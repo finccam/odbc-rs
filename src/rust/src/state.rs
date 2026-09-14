@@ -6,8 +6,9 @@ use crate::{
     types::{Column, Options, Values},
 };
 use odbc_api::{
-    handles::StatementConnection, parameter::InputParameter, Connection, ConnectionOptions,
-    ConnectionTransitions, Prepared,
+    handles::{AsStatementRef, Statement, StatementConnection},
+    parameter::InputParameter,
+    Connection, ConnectionOptions, ConnectionTransitions, Prepared,
 };
 use ouroboros::self_referencing;
 use std::{
@@ -57,6 +58,17 @@ pub enum ConnectionStatus {
     Uncertain,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ResultKind {
+    Query,
+    Statement,
+}
+
+pub struct ConnectionInfo {
+    pub dbms_name: Option<String>,
+    pub database: Option<String>,
+}
+
 pub struct ConnectionState {
     pub id: u64,
     pub pid: u32,
@@ -75,6 +87,7 @@ pub struct ResultState {
     lease: Option<Rc<ConnectionState>>,
     pub sql: String,
     pub parameter_count: usize,
+    pub kind: ResultKind,
     resource: Resource,
     pub columns: Vec<Column>,
     pub delivered: u64,
@@ -136,7 +149,11 @@ impl ConnectionState {
         Ok(())
     }
 
-    pub fn prepare(self: &Rc<Self>, sql: String) -> Result<Rc<RefCell<ResultState>>> {
+    pub fn prepare(
+        self: &Rc<Self>,
+        sql: String,
+        kind: ResultKind,
+    ) -> Result<Rc<RefCell<ResultState>>> {
         self.check("prepare")?;
         let connection = self
             .native
@@ -163,6 +180,7 @@ impl ConnectionState {
             lease: Some(self.clone()),
             sql,
             parameter_count,
+            kind,
             resource: Resource::Prepared(PreparedOwner {
                 statement,
                 parameters: vec![],
@@ -183,6 +201,66 @@ impl ConnectionState {
         if error.uncertain {
             self.status.set(ConnectionStatus::Uncertain);
         }
+    }
+
+    pub fn local(&self) -> bool {
+        self.pid == std::process::id()
+    }
+
+    pub fn has_native(&self) -> bool {
+        self.native.borrow().is_some()
+    }
+
+    pub fn active_results(&self) -> usize {
+        self.results
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|r| r.try_borrow().map_or(true, |r| r.has_resource()))
+            .count()
+    }
+
+    /// SQL_ATTR_CONNECTION_DEAD is a driver check, not a SELECT health probe.
+    /// Some drivers do not implement it; local validity remains useful there.
+    pub fn is_valid(&self) -> bool {
+        if self.check("validity").is_err() {
+            return false;
+        }
+        let native = self.native.borrow();
+        let Some(native) = native.as_ref() else {
+            return false;
+        };
+        match native.is_dead() {
+            Ok(false) => true,
+            Err(error) if unsupported(&error) => true,
+            _ => {
+                self.status.set(ConnectionStatus::Uncertain);
+                false
+            }
+        }
+    }
+
+    pub fn info(&self) -> Result<ConnectionInfo> {
+        self.check("connection_info")?;
+        let native = self.native.borrow();
+        let native = native
+            .as_ref()
+            .ok_or_else(|| invalid("connection_info", "Connection has been released"))?;
+        let read = |value: std::result::Result<String, odbc_api::Error>| match value {
+            Ok(value) => Ok(Some(value)),
+            Err(error) if unsupported(&error) => Ok(None),
+            Err(error) => {
+                let error = DriverError::odbc("connection_info", error);
+                self.observe_error(&error);
+                Err(error)
+            }
+        };
+        let dbms_name = read(native.database_management_system_name())?;
+        let database = read(native.current_catalog())?;
+        Ok(ConnectionInfo {
+            dbms_name,
+            database,
+        })
     }
 
     pub fn close(&self) -> Result<()> {
@@ -241,6 +319,62 @@ impl ResultState {
             && !matches!(self.resource, Resource::Cleared | Resource::Failed)
     }
 
+    pub fn local(&self) -> bool {
+        self.pid == std::process::id()
+    }
+
+    pub fn has_resource(&self) -> bool {
+        matches!(self.resource, Resource::Prepared(_) | Resource::Active(_))
+    }
+
+    pub fn check(&self, operation: &'static str) -> Result<()> {
+        if !self.local() {
+            return Err(invalid(operation, "Result belongs to another process"));
+        }
+        if !self.has_resource() {
+            return Err(invalid(operation, "Result has been cleared or has failed"));
+        }
+        self.connection()?.check(operation)
+    }
+
+    pub fn status(&self) -> &'static str {
+        if !self.local() {
+            return "invalid";
+        }
+        match &self.resource {
+            Resource::Cleared => "cleared",
+            Resource::Failed => "failed",
+            _ if !self.valid() => "invalid",
+            _ if self.kind == ResultKind::Statement && self.native_attempt.is_some() => "completed",
+            Resource::Prepared(_) if self.native_attempt.is_none() => "prepared",
+            Resource::Prepared(_) => "completed",
+            Resource::Active(_) if self.complete() => "exhausted",
+            Resource::Active(_) => "fetchable",
+        }
+    }
+
+    pub fn column_info(&mut self) -> Result<Vec<Column>> {
+        self.check("column_info")?;
+        if self.native_attempt.is_none() {
+            if let Resource::Prepared(owner) = &mut self.resource {
+                let options = self
+                    .lease
+                    .as_ref()
+                    .ok_or_else(|| invalid("column_info", "Connection has been released"))?
+                    .options
+                    .clone();
+                self.columns =
+                    crate::types::describe(&mut owner.statement, &options).map_err(|error| {
+                        if let Some(connection) = self.connection.upgrade() {
+                            connection.observe_error(&error);
+                        }
+                        error
+                    })?;
+            }
+        }
+        Ok(self.columns.clone())
+    }
+
     fn recover_prepared(&mut self) -> Result<PreparedOwner> {
         match std::mem::replace(&mut self.resource, Resource::Failed) {
             Resource::Prepared(owner) => Ok(owner),
@@ -291,9 +425,11 @@ impl ResultState {
         self.consumption_error = None;
         self.native_attempt = None;
         let options = connection.options.clone();
+        let kind = self.kind;
+        let affected = Cell::new(None);
         let attempt_id = identity();
         let attempt = RefCell::new(None);
-        let active = ActiveResultTryBuilder {
+        let active: Result<ActiveResult> = ActiveResultTryBuilder {
             owner,
             fetcher_builder: |owner: &mut PreparedOwner| {
                 let start = Instant::now();
@@ -317,10 +453,20 @@ impl ResultState {
                     outcome,
                     duration_seconds,
                 });
-                result
-                    .map_err(|e| DriverError::odbc("execute", e))?
-                    .map(|cursor| Fetcher::new(cursor, options))
-                    .transpose()
+                let cursor = result.map_err(|e| DriverError::odbc("execute", e))?;
+                if let Some(mut cursor) = cursor {
+                    if kind == ResultKind::Statement {
+                        let mut statement = cursor.as_stmt_ref();
+                        let count = statement
+                            .row_count()
+                            .into_result_without_logging(&statement)
+                            .map_err(|e| DriverError::odbc("rows_affected", e))?;
+                        affected.set(usize::try_from(count).ok());
+                    }
+                    Ok(Some(Fetcher::new(cursor, options)?))
+                } else {
+                    Ok(None)
+                }
             },
         }
         .try_build();
@@ -331,10 +477,14 @@ impl ResultState {
                     .with_fetcher(|f| f.as_ref().map_or_else(Vec::new, |f| f.columns.clone()));
                 if active.with_fetcher(|f| f.is_none()) {
                     let mut owner = active.into_heads().owner;
-                    let affected = owner
-                        .statement
-                        .row_count()
-                        .map_err(|e| DriverError::odbc("rows_affected", e));
+                    let affected = if kind == ResultKind::Statement {
+                        owner
+                            .statement
+                            .row_count()
+                            .map_err(|e| DriverError::odbc("rows_affected", e))
+                    } else {
+                        Ok(None)
+                    };
                     self.resource = Resource::Prepared(owner);
                     match affected {
                         Ok(n) => self.affected = n,
@@ -345,6 +495,7 @@ impl ResultState {
                         }
                     }
                 } else {
+                    self.affected = affected.get();
                     self.resource = Resource::Active(active);
                 }
                 Ok(())
@@ -364,8 +515,12 @@ impl ResultState {
     }
 
     pub fn fetch(&mut self, limit: Option<usize>) -> Result<Vec<Values>> {
+        self.check("fetch")?;
         let connection = self.connection()?;
         connection.check("fetch")?;
+        if self.kind == ResultKind::Statement && self.native_attempt.is_some() {
+            return Ok(vec![]);
+        }
         let result = match &mut self.resource {
             Resource::Active(active) => active.with_fetcher_mut(|f| {
                 f.as_mut()
@@ -393,6 +548,12 @@ impl ResultState {
     }
 
     pub fn complete(&self) -> bool {
+        if self.kind == ResultKind::Statement
+            && self.has_resource()
+            && self.native_attempt.is_some()
+        {
+            return true;
+        }
         match &self.resource {
             Resource::Active(active) => {
                 active.with_fetcher(|f| f.as_ref().is_none_or(Fetcher::complete))
@@ -402,12 +563,40 @@ impl ResultState {
         }
     }
 
+    /// Discover an initially empty result without counting prefetched rows as
+    /// delivered. Later calls normally only inspect the retained buffer/EOF state.
+    pub fn has_completed(&mut self) -> Result<bool> {
+        self.check("completion")?;
+        if self.kind == ResultKind::Statement {
+            return Ok(self.native_attempt.is_some());
+        }
+        let outcome = match &mut self.resource {
+            Resource::Active(active) => {
+                active.with_fetcher_mut(|f| f.as_mut().map_or(Ok(true), Fetcher::has_completed))
+            }
+            _ => Ok(self.complete()),
+        };
+        if let Err(error) = &outcome {
+            if let Ok(connection) = self.connection() {
+                connection.observe_error(error);
+            }
+            self.consumption_error = Some(error.clone());
+            let resource = std::mem::replace(&mut self.resource, Resource::Failed);
+            if release(resource, "completion_cleanup").is_err() {
+                if let Ok(connection) = self.connection() {
+                    connection.status.set(ConnectionStatus::Uncertain);
+                }
+            }
+        }
+        outcome
+    }
+
     pub fn clear(&mut self) -> Result<()> {
         if self.pid != std::process::id() {
             return Err(invalid("clear", "Result belongs to another process"));
         }
         let resource = std::mem::replace(&mut self.resource, Resource::Cleared);
-        let result = match resource {
+        let mut result = match resource {
             Resource::Active(mut active) => {
                 let close = active.with_fetcher_mut(|f| f.take().map_or(Ok(()), Fetcher::close));
                 let cleanup = release(active, "clear");
@@ -415,7 +604,8 @@ impl ResultState {
             }
             resource => release(resource, "clear"),
         };
-        if let Err(error) = &result {
+        if let Err(error) = &mut result {
+            error.uncertain = true;
             if let Ok(connection) = self.connection() {
                 connection.status.set(ConnectionStatus::Uncertain);
                 connection.observe_error(error);
@@ -425,6 +615,11 @@ impl ResultState {
         let cleanup = release(self.lease.take(), "clear_connection_reference");
         result.and(cleanup)
     }
+}
+
+fn unsupported(error: &odbc_api::Error) -> bool {
+    matches!(error, odbc_api::Error::Diagnostics { record, .. }
+        if matches!(record.state.as_str(), "HYC00" | "HY092" | "HY096" | "IM001" | "S1C00" | "S1092"))
 }
 
 pub fn release<T>(value: T, operation: &'static str) -> Result<()> {

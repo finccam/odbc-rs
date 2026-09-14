@@ -1,8 +1,9 @@
 # Native foundation (first implementation batch)
 
-This batch supplies the private Rust resource and conversion layer. The exported
-DBI methods remain scaffold methods; the next batch wires them to these
-primitives. This is not yet a usable DBI driver or a compatibility claim.
+This document records the private Rust resource and conversion foundation.
+[Batch 1](batch-1-connection-results.md) now wires connection/result methods to
+these primitives; public execution remains the next batch. This is not yet a
+usable general DBI driver or a compatibility claim.
 
 ## Ownership and lifecycle
 
@@ -88,13 +89,14 @@ allocations; the output requested by R is additional memory.
 * Positive `n`: consume pending rows first, then fetch as many blocks as needed.
 * `n = -1` or `Inf`: accumulate all remaining rows.
 * At a consumed block boundary: look ahead and retain the next block, or record EOF.
-* Completion: EOF is known and no buffered rows remain.
+* Completion: EOF is known and no buffered rows remain. Batch 1 also permits an
+  initial bounded prefetch by dbHasCompleted to establish whether a result is empty.
 * Truncation: block fetching uses `fetch_with_truncation_check(true)`; it does not
   silently return shortened fields or re-execute the query.
 
 The private interface currently limits a requested/returned data frame to the
-ordinary signed-32-bit row-count representation. `n = NA` and longer data frames
-are not implemented. Driver/server buffering is outside the package-owned buffer
+ordinary signed-32-bit row-count representation. Batch 1 supports `n = NA` as a
+driver-sized fetch; longer data frames are not implemented. Driver/server buffering is outside the package-owned buffer
 budget. No OFFSET/LIMIT pagination, cardinality queries, or scrollable cursors are
 introduced.
 
@@ -140,8 +142,8 @@ the next operation-wiring batch. No hidden per-row execution loop is supplied.
 
 The private connect primitive accepts a complete connection string (including DSN
 strings), bigint, timezone, timezone_out, and login timeout. Named connection-string
-assembly, encoding/name_encoding overrides, immediate execution, transactions, and
-table operations are still to be wired/implemented. Unsupported private options
+assembly is now provided by batch 1. Encoding/name_encoding overrides, immediate
+execution, transactions, and table operations are still to be wired/implemented. Unsupported private options
 are rejected rather than ignored.
 
 ## Diagnostics and private bridge

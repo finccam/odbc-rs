@@ -4,4 +4,5 @@
 \usage{odbc_rs()}
 \value{An \code{OdbcRsDriver} object.}
 \description{Constructs a DBI driver object without opening a connection.
-This is an interface scaffold: database methods are not implemented.}
+Connection lifecycle and result access methods are available. Public execution,
+table, quoting, and transaction methods remain scaffolded.}

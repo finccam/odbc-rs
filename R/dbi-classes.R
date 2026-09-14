@@ -1,8 +1,8 @@
 #' DBI objects for the Rust-backed ODBC driver
 #'
-#' These classes currently provide the DBI interface scaffold only. Database
-#' operations are not implemented. Connection and result objects have private
-#' external-pointer slots for the native resource layer.
+#' Connection lifecycle and result access methods use the native resource layer.
+#' Public execution, table, quoting, and transaction methods remain scaffolded.
+#' Connections and results have private external-pointer slots.
 #' @import methods
 #' @import DBI
 #' @export
@@ -29,7 +29,8 @@ setClass(
 #' Create a Rust-backed ODBC driver object
 #'
 #' Constructs the driver object without opening a database connection.
-#' Database methods currently stop with a not-implemented error.
+#' Use DBI::dbConnect() to open a connection. Public query execution is not yet
+#' wired; execution, table, quoting, and transaction methods remain scaffolded.
 #' @return An OdbcRsDriver object.
 #' @export
 odbc_rs <- function() {

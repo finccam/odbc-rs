@@ -3,7 +3,7 @@
 use crate::{
     error::{DriverError, Result as NativeResult},
     parameters::ParameterBatch,
-    state::{ConnectionState, ConnectionStatus, ResultState},
+    state::{ConnectionState, ConnectionStatus, ResultKind, ResultState},
     types::{BigInt, Column, Kind, Options, Values},
 };
 use extendr_api::prelude::*;
@@ -158,14 +158,19 @@ fn native_connect(connection_string: String, config: List) -> List {
 }
 
 #[extendr]
-fn native_prepare(ptr: Robj, sql: String) -> List {
+fn native_prepare(ptr: Robj, sql: String, statement: bool) -> List {
     boundary(|| {
         let conn = connection(ptr)?;
         let _guard = PoisonOnUnwind(conn.clone());
         if sql.contains('\0') {
             return Err(DriverError::new("prepare", "parameter", "SQL contains NUL"));
         }
-        Ok(ExternalPtr::new(ResultHandle(conn.prepare(sql)?)).into())
+        let kind = if statement {
+            ResultKind::Statement
+        } else {
+            ResultKind::Query
+        };
+        Ok(ExternalPtr::new(ResultHandle(conn.prepare(sql, kind)?)).into())
     })
 }
 
@@ -195,7 +200,9 @@ fn native_bind_scalar(ptr: Robj, parameters: Robj) -> List {
 #[extendr]
 fn native_fetch(ptr: Robj, n: f64) -> List {
     boundary(|| {
-        let limit = if n == -1.0 || n == f64::INFINITY {
+        let limit = if n.is_na() {
+            Some(Options::default().max_rows)
+        } else if n == -1.0 || n == f64::INFINITY {
             None
         } else if n.is_finite() && n >= 0.0 && n.fract() == 0.0 && n <= i32::MAX as f64 {
             Some(n as usize)
@@ -203,7 +210,7 @@ fn native_fetch(ptr: Robj, n: f64) -> List {
             return Err(DriverError::new(
                 "fetch",
                 "parameter",
-                "n must be -1, Inf, or a nonnegative whole number within R's data-frame row limit",
+                "n must be NA, -1, Inf, or a nonnegative whole number within R's data-frame row limit",
             ));
         };
         let result = result(ptr)?;
@@ -212,7 +219,12 @@ fn native_fetch(ptr: Robj, n: f64) -> List {
         let (values, columns) = {
             let mut state = result.try_borrow_mut().map_err(|_| busy())?;
             let values = state.fetch(limit)?;
-            (values, state.columns.clone())
+            let columns = if state.kind == ResultKind::Statement {
+                vec![]
+            } else {
+                state.columns.clone()
+            };
+            (values, columns)
         };
         let rows = values.first().map_or(0, Values::len);
         // R allocation happens after releasing the native operation borrow.
@@ -256,15 +268,97 @@ fn native_disconnect(ptr: Robj) -> List {
 }
 
 #[extendr]
-fn native_connection_info(ptr: Robj) -> List {
+fn native_connection_status(ptr: Robj) -> List {
     boundary(|| {
         let conn = connection(ptr)?;
         Ok(list!(
             id = conn.id.to_string(),
             valid = conn.check("validity").is_ok(),
-            status = format!("{:?}", conn.status.get())
+            status = format!("{:?}", conn.status.get()),
+            local = conn.local(),
+            has_native = conn.has_native(),
+            active_results = conn.active_results() as f64
         )
         .into())
+    })
+}
+
+#[extendr]
+fn native_connection_valid(ptr: Robj) -> List {
+    boundary(|| {
+        let conn = connection(ptr)?;
+        let _guard = PoisonOnUnwind(conn.clone());
+        Ok(conn.is_valid().into())
+    })
+}
+
+#[extendr]
+fn native_connection_info(ptr: Robj) -> List {
+    boundary(|| {
+        let conn = connection(ptr)?;
+        let _guard = PoisonOnUnwind(conn.clone());
+        if !conn.is_valid() {
+            return Err(DriverError::new(
+                "connection_info",
+                "state",
+                "Connection is closed or invalid",
+            ));
+        }
+        let info = conn.info()?;
+        // The high-level crate exposes DBMS name and catalog, but not generic
+        // SQLGetInfo version/driver/username/server getters. Do not recover a raw
+        // handle by layout casts or invent those fields from a connection string.
+        Ok(list!(
+            id = conn.id.to_string(),
+            dbms_name = info.dbms_name,
+            database = info.database,
+            dbms_version = Rstr::na(),
+            driver_name = Rstr::na(),
+            driver_version = Rstr::na(),
+            username = Rstr::na(),
+            server = Rstr::na()
+        )
+        .into())
+    })
+}
+
+#[extendr]
+fn native_result_status(ptr: Robj) -> List {
+    boundary(|| {
+        let result = result(ptr)?;
+        let state = result.try_borrow().map_err(|_| busy())?;
+        Ok(list!(
+            valid = state.valid(),
+            local = state.local(),
+            state = state.status(),
+            has_resource = state.has_resource()
+        )
+        .into())
+    })
+}
+
+#[extendr]
+fn native_has_completed(ptr: Robj) -> List {
+    boundary(|| {
+        let result = result(ptr)?;
+        let conn = result.try_borrow().map_err(|_| busy())?.connection()?;
+        let _guard = PoisonOnUnwind(conn);
+        let completed = result
+            .try_borrow_mut()
+            .map_err(|_| busy())?
+            .has_completed()?;
+        Ok(completed.into())
+    })
+}
+
+#[extendr]
+fn native_column_info(ptr: Robj) -> List {
+    boundary(|| {
+        let result = result(ptr)?;
+        let conn = result.try_borrow().map_err(|_| busy())?.connection()?;
+        let _guard = PoisonOnUnwind(conn);
+        let columns = result.try_borrow_mut().map_err(|_| busy())?.column_info()?;
+        Ok(column_info(&columns).into())
     })
 }
 
@@ -273,6 +367,7 @@ fn native_result_info(ptr: Robj) -> List {
     boundary(|| {
         let result = result(ptr)?;
         let state = result.try_borrow().map_err(|_| busy())?;
+        state.check("result_info")?;
         let attempt: Robj = state
             .native_attempt
             .as_ref()
@@ -294,6 +389,12 @@ fn native_result_info(ptr: Robj) -> List {
             completed = state.complete(),
             rows_delivered = state.delivered as f64,
             rows_affected = state.affected.map(|n| n as f64),
+            kind = if state.kind == ResultKind::Query {
+                "query"
+            } else {
+                "statement"
+            },
+            executed = state.native_attempt.is_some(),
             statement = state.sql.clone(),
             native_attempt = attempt,
             consumption_failed = state.consumption_error.is_some(),
@@ -307,7 +408,17 @@ fn column_info(columns: &[Column]) -> List {
     List::from_values(columns.iter().map(|c| {
         list!(
             name = c.name.clone(),
-            r_type = format!("{:?}", c.kind),
+            r_type = match c.kind {
+                Kind::Logical => "logical",
+                Kind::Integer => "integer",
+                Kind::Integer64 => "integer64",
+                Kind::Double => "double",
+                Kind::Text => "character",
+                Kind::Binary => "blob",
+                Kind::Date => "Date",
+                Kind::Time => "hms",
+                Kind::Timestamp | Kind::TimestampOffset => "POSIXct",
+            },
             native_type = format!("{:?}", c.native_type),
             nullable = c.nullable
         )
@@ -406,5 +517,10 @@ extendr_module! {
     fn native_clear;
     fn native_disconnect;
     fn native_connection_info;
+    fn native_connection_status;
+    fn native_connection_valid;
     fn native_result_info;
+    fn native_result_status;
+    fn native_has_completed;
+    fn native_column_info;
 }

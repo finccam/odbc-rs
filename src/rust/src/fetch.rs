@@ -82,6 +82,10 @@ impl<'a> Fetcher<'a> {
     pub fn complete(&self) -> bool {
         self.eof && self.offset == self.pending_rows()
     }
+    pub fn has_completed(&mut self) -> Result<bool> {
+        self.refill()?;
+        Ok(self.complete())
+    }
     fn pending_rows(&self) -> usize {
         self.pending.first().map_or(0, Values::len)
     }

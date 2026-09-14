@@ -4,15 +4,14 @@
 \alias{OdbcRsResult-class}
 \title{DBI objects for the Rust-backed ODBC driver}
 \description{S4 subclasses of \code{DBIDriver}, \code{DBIConnection}, and
-\code{DBIResult}. They currently provide an interface scaffold only, with no
-public database behavior. Connections and results contain a private
+\code{DBIResult}. Connections and results contain a private
 \code{ptr} external-pointer slot for the native resource layer. An object
 constructed directly has an empty pointer and no database resources.}
-\details{Connection, execution, binding, result, quoting, type, table,
-transaction, information, validity, and display methods are registered as
-not-implemented placeholders. Method signatures follow the DBI generics;
-additional operation options are accepted through \code{...} but are not
-processed. See the corresponding DBI documentation for the intended contracts.
-Use \code{odbc_rs()} to construct a driver. Connection and result objects will
-be created by database methods once the native backend is implemented.}
-\seealso{\code{\link{odbc_rs}}}
+\details{Use \code{odbc_rs()} to construct a driver and \code{DBI::dbConnect()}
+to open a connection. Connection lifecycle, information, validity, display,
+and result access methods are implemented. Public execution, binding, quoting,
+type declaration, table, and transaction methods remain scaffolded. Result
+objects are constructed by a private preparation helper until execution is wired.
+Native resources must not be serialized or reused in another process.}
+\seealso{\code{\link{odbc_rs}}, \code{\link{OdbcRs-connection}},
+\code{\link{OdbcRs-result}}}

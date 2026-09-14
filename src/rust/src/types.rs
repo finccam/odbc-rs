@@ -71,6 +71,11 @@ pub fn describe(cursor: &mut impl ResultSetMetadata, options: &Options) -> Resul
             let name = desc
                 .name_to_string()
                 .map_err(|e| DriverError::new("metadata", "encoding", e.to_string()))?;
+            let name = if name.is_empty() {
+                format!("V{index}")
+            } else {
+                name
+            };
             let dt = desc.data_type;
             let kind = match dt {
                 DataType::Bit => Kind::Logical,
