@@ -10,7 +10,9 @@
   ],
   "requirements": [
     "rextendr (< 1.0.0)",
-    "rextendr (>= 0.5.0)"
+    "rextendr (>= 0.5.0)",
+    "usethis (< 4.0.0)",
+    "usethis (>= 3.2.2)"
   ],
   "packages": {
     "R6": {
@@ -18,6 +20,13 @@
       "repository": "https://rrepo.dev/upstream/cran",
       "dependencies": [
         "R (>= 3.6)"
+      ]
+    },
+    "askpass": {
+      "version": "1.2.1",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "sys (>= 2.1)"
       ]
     },
     "brio": {
@@ -44,6 +53,40 @@
       "dependencies": [
         "R (>= 3.4)",
         "utils"
+      ]
+    },
+    "clipr": {
+      "version": "0.8.1",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "utils"
+      ]
+    },
+    "crayon": {
+      "version": "1.5.3",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "grDevices",
+        "methods",
+        "utils"
+      ]
+    },
+    "credentials": {
+      "version": "2.0.3",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "askpass",
+        "curl",
+        "jsonlite",
+        "openssl (>= 1.3)",
+        "sys (>= 2.1)"
+      ]
+    },
+    "curl": {
+      "version": "8.0.0",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "R (>= 3.0.0)"
       ]
     },
     "desc": {
@@ -76,12 +119,54 @@
         "vctrs (>= 0.7.1)"
       ]
     },
+    "fs": {
+      "version": "2.1.0",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "methods",
+        "R (>= 4.1)"
+      ]
+    },
     "generics": {
       "version": "0.1.4",
       "repository": "https://rrepo.dev/upstream/cran",
       "dependencies": [
         "methods",
         "R (>= 3.6)"
+      ]
+    },
+    "gert": {
+      "version": "2.4.1",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "askpass",
+        "credentials (>= 1.2.1)",
+        "openssl (>= 2.0.3)",
+        "rstudioapi (>= 0.11)",
+        "sys",
+        "zip (>= 2.1.0)"
+      ]
+    },
+    "gh": {
+      "version": "1.6.1",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "cli (>= 3.0.1)",
+        "gitcreds",
+        "glue",
+        "httr2 (>= 1.0.6)",
+        "ini",
+        "jsonlite",
+        "lifecycle",
+        "R (>= 4.1)",
+        "rlang (>= 1.1.0)"
+      ]
+    },
+    "gitcreds": {
+      "version": "0.1.2",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "R (>= 3.4)"
       ]
     },
     "glue": {
@@ -91,6 +176,28 @@
         "methods",
         "R (>= 4.1)"
       ]
+    },
+    "httr2": {
+      "version": "1.3.0",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "cli (>= 3.0.0)",
+        "curl (>= 6.4.0)",
+        "glue",
+        "lifecycle",
+        "magrittr",
+        "openssl",
+        "R (>= 4.1)",
+        "R6",
+        "rlang (>= 1.3.0)",
+        "vctrs (>= 0.6.3)",
+        "withr"
+      ]
+    },
+    "ini": {
+      "version": "0.3.1",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": []
     },
     "jsonlite": {
       "version": "2.0.0",
@@ -115,11 +222,27 @@
         "R (>= 3.4.0)"
       ]
     },
+    "openssl": {
+      "version": "2.4.2",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "askpass"
+      ]
+    },
     "otel": {
       "version": "0.2.0",
       "repository": "https://rrepo.dev/upstream/cran",
       "dependencies": [
         "R (>= 3.6.0)"
+      ]
+    },
+    "pak": {
+      "version": "0.11.1",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "R (>= 3.5)",
+        "tools",
+        "utils"
       ]
     },
     "pillar": {
@@ -172,6 +295,26 @@
         "utils"
       ]
     },
+    "purrr": {
+      "version": "1.2.2",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "cli",
+        "cli (>= 3.6.1)",
+        "lifecycle (>= 1.0.3)",
+        "magrittr (>= 1.5.0)",
+        "R (>= 4.1)",
+        "rlang (>= 1.1.1)",
+        "vctrs (>= 0.6.3)"
+      ]
+    },
+    "rappdirs": {
+      "version": "0.3.4",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "R (>= 4.1)"
+      ]
+    },
     "rextendr": {
       "version": "0.5.0",
       "repository": "https://rrepo.dev/upstream/cran",
@@ -208,6 +351,11 @@
         "R (>= 3.0.0)"
       ]
     },
+    "rstudioapi": {
+      "version": "0.19.0",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": []
+    },
     "stringi": {
       "version": "1.8.9",
       "repository": "https://rrepo.dev/upstream/cran",
@@ -217,6 +365,11 @@
         "tools",
         "utils"
       ]
+    },
+    "sys": {
+      "version": "3.4.3",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": []
     },
     "tibble": {
       "version": "3.3.1",
@@ -247,6 +400,33 @@
         "withr"
       ]
     },
+    "usethis": {
+      "version": "3.2.2",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "cli (>= 3.0.1)",
+        "clipr (>= 0.3.0)",
+        "crayon",
+        "curl (>= 2.7)",
+        "desc (>= 1.4.2)",
+        "fs (>= 1.3.0)",
+        "gert (>= 1.4.1)",
+        "gh (>= 1.6.0)",
+        "glue (>= 1.3.0)",
+        "jsonlite",
+        "lifecycle (>= 1.0.0)",
+        "pak",
+        "purrr",
+        "R (>= 4.1)",
+        "rappdirs",
+        "rlang (>= 1.1.0)",
+        "rprojroot (>= 2.1.1)",
+        "rstudioapi",
+        "whisker",
+        "withr (>= 2.3.0)",
+        "yaml"
+      ]
+    },
     "utf8": {
       "version": "1.2.6",
       "repository": "https://rrepo.dev/upstream/cran",
@@ -265,6 +445,11 @@
         "rlang (>= 1.1.7)"
       ]
     },
+    "whisker": {
+      "version": "0.4.1",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": []
+    },
     "withr": {
       "version": "3.0.3",
       "repository": "https://rrepo.dev/upstream/cran",
@@ -272,6 +457,18 @@
         "graphics",
         "grDevices",
         "R (>= 3.6.0)"
+      ]
+    },
+    "yaml": {
+      "version": "2.3.12",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": []
+    },
+    "zip": {
+      "version": "3.0.2",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "cli"
       ]
     }
   }
