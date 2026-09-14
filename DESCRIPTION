@@ -1,0 +1,11 @@
+Package: odbc.rs
+Title: Odbc rs
+Version: 0.1.0
+Authors@R: person(given = "Adam Smielewski", email = "adam@blyedev.com", role = c("aut", "cre"))
+Author: Adam Smielewski [aut, cre]
+Maintainer: Adam Smielewski <adam@blyedev.com>
+Description: Connect to ODBC Compatible Databases
+License: MIT + file LICENSE
+Imports:
+    rextendr (< 1.0.0),
+    rextendr (>= 0.5.0)
