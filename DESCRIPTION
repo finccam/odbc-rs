@@ -6,8 +6,16 @@ Author: Adam Smielewski [aut, cre]
 Maintainer: Adam Smielewski <adam@blyedev.com>
 Description: Connect to ODBC Compatible Databases
 License: MIT + file LICENSE
+Depends:
+    R (>= 4.2)
 Imports:
     rextendr (< 1.0.0),
     rextendr (>= 0.5.0),
     usethis (< 4.0.0),
     usethis (>= 3.2.2)
+Suggests:
+    devtools (< 3.0.0),
+    devtools (>= 2.5.2)
+Config/rextendr/version: 0.5.0
+SystemRequirements: Cargo (Rust's package manager), rustc >= 1.65.0, xz
+Config/roxygen2/version: 8.1.0
