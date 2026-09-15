@@ -17,8 +17,8 @@
   .native_value(.Call(wrap__native_connect, connection_string, config))
 }
 
-.native_prepare <- function(ptr, sql, statement = FALSE) {
-  .native_value(.Call(wrap__native_prepare, ptr, enc2utf8(sql), statement))
+.native_prepare <- function(ptr, sql, statement = FALSE, immediate = FALSE) {
+  .native_value(.Call(wrap__native_prepare, ptr, enc2utf8(sql), statement, immediate))
 }
 
 .native_bind_scalar <- function(ptr, params = list()) {
@@ -74,15 +74,15 @@
   .native_value(.Call(wrap__native_column_info, ptr))
 }
 
-# Batch 2 must set the result kind from the DBI entry point, not SQL text, and
-# execute/bind using the same pointer returned here. This helper only prepares.
-.new_result <- function(conn, sql, statement = FALSE) {
+# This helper only allocates/prepares. Send methods execute on the same pointer.
+.new_result <- function(conn, sql, statement = FALSE, immediate = FALSE) {
   if (!is(conn, "OdbcRsConnection")) .dbi_argument_error("Expected an OdbcRsConnection")
   sql <- .connection_scalar(sql, "statement")
   if (!is.logical(statement) || length(statement) != 1L || is.na(statement)) {
     .dbi_argument_error("statement must be TRUE or FALSE")
   }
-  ptr <- .native_prepare(conn@ptr, sql, statement)
+  immediate <- .execution_mode(immediate, FALSE)
+  ptr <- .native_prepare(conn@ptr, sql, statement, immediate)
   installed <- FALSE
   on.exit(if (!installed) try(.native_clear(ptr), silent = TRUE), add = TRUE)
   res <- new("OdbcRsResult", ptr = ptr)

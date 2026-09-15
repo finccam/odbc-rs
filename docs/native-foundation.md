@@ -1,12 +1,12 @@
 # Native foundation (first implementation batch)
 
 This document records the private Rust resource and conversion foundation.
-[Batch 1](batch-1-connection-results.md) now wires connection/result methods to
-these primitives; public execution remains the next batch. This is not yet a
+[Batch 1](batch-1-connection-results.md) wires connection/result methods to
+these primitives, and [Batch B](batch-b-execution.md) adds public scalar execution. This is not yet a
 usable general DBI driver or a compatibility claim.
 
 [Batch A](batch-a-sql.md) adds SQL Server quoting and type declarations in R;
-public execution remains the next dependency layer.
+the native resource layer is shared by prepared and direct execution.
 
 ## Ownership and lifecycle
 

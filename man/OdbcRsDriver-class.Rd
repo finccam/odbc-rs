@@ -11,8 +11,8 @@ constructed directly has an empty pointer and no database resources.}
 \details{Use \code{odbc_rs()} to construct a driver and \code{DBI::dbConnect()}
 to open a connection. Connection lifecycle, information, validity, display,
 and result access methods are implemented. SQL Server quoting and type declarations
-are available. Public execution, binding, table, and transaction methods remain scaffolded. Result
-objects are constructed by a private preparation helper until execution is wired.
+and scalar execution are available. Results are created by the public send
+methods. Batch binding, table methods, and transaction methods are not implemented.
 Native resources must not be serialized or reused in another process.}
 \seealso{\code{\link{odbc_rs}}, \code{\link{OdbcRs-connection}},
-\code{\link{OdbcRs-result}}, \code{\link{OdbcRs-sql}}}
+\code{\link{OdbcRs-result}}, \code{\link{OdbcRs-sql}}, \code{\link{OdbcRs-execution}}}

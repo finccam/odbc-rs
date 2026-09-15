@@ -1,7 +1,7 @@
 //! Copy and validate all input before touching an existing cursor or executing SQL.
 use crate::{
     error::{DriverError, Result as NativeResult},
-    state::Parameters,
+    statement::Parameters,
     types::{self, Options},
 };
 use extendr_api::prelude::*;
@@ -12,15 +12,14 @@ use odbc_api::{
 
 pub struct ParameterBatch {
     pub rows: Vec<Parameters>,
-    pub column_count: usize,
 }
 
 impl ParameterBatch {
-    pub fn from_r(input: &Robj, expected: usize, options: &Options) -> NativeResult<Self> {
+    pub fn from_r(input: &Robj, expected: Option<usize>, options: &Options) -> NativeResult<Self> {
         let input = input
             .as_list()
             .ok_or_else(|| parameter("Parameters must be a list or data frame"))?;
-        if input.len() != expected {
+        if let Some(expected) = expected.filter(|expected| *expected != input.len()) {
             return Err(parameter(format!(
                 "Expected {expected} parameter columns; received {}",
                 input.len()
@@ -30,17 +29,19 @@ impl ParameterBatch {
         if input.values().any(|x| x.len() != n) {
             return Err(parameter("All parameter columns must have the same length"));
         }
-        let mut rows: Vec<Parameters> = (0..n).map(|_| Vec::with_capacity(expected)).collect();
+        // Reject batches before allocating/converting their values. A later
+        // native array path will own batch execution; never loop scalar writes.
+        if n != 1 {
+            return Err(parameter("Scalar binding requires one row; zero-row and multirow parameter batches are not implemented"));
+        }
+        let mut rows: Vec<Parameters> = (0..n).map(|_| Vec::with_capacity(input.len())).collect();
         for column in input.values() {
             let converted = convert_column(&column, options)?;
             for (row, value) in rows.iter_mut().zip(converted) {
                 row.push(value);
             }
         }
-        Ok(Self {
-            rows,
-            column_count: expected,
-        })
+        Ok(Self { rows })
     }
 }
 

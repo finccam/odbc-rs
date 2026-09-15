@@ -3,12 +3,12 @@
 use crate::{
     error::{DriverError, Result},
     fetch::Fetcher,
+    statement::{NativeStatement, Parameters, StatementOwner},
     types::{Column, Options, Values},
 };
 use odbc_api::{
-    handles::{AsStatementRef, Statement, StatementConnection},
-    parameter::InputParameter,
-    Connection, ConnectionOptions, ConnectionTransitions, Prepared,
+    handles::{AsStatementRef, Statement},
+    Connection, ConnectionOptions, ConnectionTransitions,
 };
 use ouroboros::self_referencing;
 use std::{
@@ -26,25 +26,16 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 fn identity() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
-pub type OwnedPrepared = Prepared<StatementConnection<Arc<Connection<'static>>>>;
-pub type Parameters = Vec<Box<dyn InputParameter>>;
-
-pub struct PreparedOwner {
-    pub statement: OwnedPrepared,
-    // Bound values outlive the cursor and remain available until the next bind.
-    pub parameters: Parameters,
-}
-
 #[self_referencing]
 pub struct ActiveResult {
-    owner: PreparedOwner,
+    owner: StatementOwner,
     #[borrows(mut owner)]
     #[not_covariant]
     fetcher: Option<Fetcher<'this>>,
 }
 
 enum Resource {
-    Prepared(PreparedOwner),
+    Ready(StatementOwner),
     Active(ActiveResult),
     Failed,
     Cleared,
@@ -86,7 +77,10 @@ pub struct ResultState {
     // Cleared results retain metadata but do not keep abandoned sessions open.
     lease: Option<Rc<ConnectionState>>,
     pub sql: String,
-    pub parameter_count: usize,
+    // Direct execution has no prepared metadata: the driver validates its
+    // marker count during execution, without a second prepare or SQL parser.
+    pub parameter_count: Option<usize>,
+    pub immediate: bool,
     pub kind: ResultKind,
     resource: Resource,
     pub columns: Vec<Column>,
@@ -153,6 +147,7 @@ impl ConnectionState {
         self: &Rc<Self>,
         sql: String,
         kind: ResultKind,
+        immediate: bool,
     ) -> Result<Rc<RefCell<ResultState>>> {
         self.check("prepare")?;
         let connection = self
@@ -162,16 +157,21 @@ impl ConnectionState {
             .as_ref()
             .cloned()
             .ok_or_else(|| invalid("prepare", "Connection is closed"))?;
-        let mut statement = connection.into_prepared(&sql).map_err(|e| {
+        let on_error = |e| {
             let error = DriverError::odbc("prepare", e);
             self.observe_error(&error);
             error
-        })?;
-        let parameter_count = statement.num_params().map_err(|e| {
-            let error = DriverError::odbc("prepare", e);
-            self.observe_error(&error);
-            error
-        })? as usize;
+        };
+        let (statement, parameter_count) = if immediate {
+            (
+                NativeStatement::Direct(connection.into_preallocated().map_err(on_error)?),
+                None,
+            )
+        } else {
+            let mut statement = connection.into_prepared(&sql).map_err(on_error)?;
+            let count = statement.num_params().map_err(on_error)? as usize;
+            (NativeStatement::Prepared(statement), Some(count))
+        };
         let result = Rc::new(RefCell::new(ResultState {
             id: identity(),
             connection_id: self.id,
@@ -180,8 +180,9 @@ impl ConnectionState {
             lease: Some(self.clone()),
             sql,
             parameter_count,
+            immediate,
             kind,
-            resource: Resource::Prepared(PreparedOwner {
+            resource: Resource::Ready(StatementOwner {
                 statement,
                 parameters: vec![],
             }),
@@ -324,7 +325,7 @@ impl ResultState {
     }
 
     pub fn has_resource(&self) -> bool {
-        matches!(self.resource, Resource::Prepared(_) | Resource::Active(_))
+        matches!(self.resource, Resource::Ready(_) | Resource::Active(_))
     }
 
     pub fn check(&self, operation: &'static str) -> Result<()> {
@@ -346,8 +347,14 @@ impl ResultState {
             Resource::Failed => "failed",
             _ if !self.valid() => "invalid",
             _ if self.kind == ResultKind::Statement && self.native_attempt.is_some() => "completed",
-            Resource::Prepared(_) if self.native_attempt.is_none() => "prepared",
-            Resource::Prepared(_) => "completed",
+            Resource::Ready(_) if self.native_attempt.is_none() => {
+                if self.immediate {
+                    "allocated"
+                } else {
+                    "prepared"
+                }
+            }
+            Resource::Ready(_) => "completed",
             Resource::Active(_) if self.complete() => "exhausted",
             Resource::Active(_) => "fetchable",
         }
@@ -356,7 +363,13 @@ impl ResultState {
     pub fn column_info(&mut self) -> Result<Vec<Column>> {
         self.check("column_info")?;
         if self.native_attempt.is_none() {
-            if let Resource::Prepared(owner) = &mut self.resource {
+            if self.immediate {
+                return Err(invalid(
+                    "column_info",
+                    "Direct statement must be executed before requesting columns",
+                ));
+            }
+            if let Resource::Ready(owner) = &mut self.resource {
                 let options = self
                     .lease
                     .as_ref()
@@ -375,9 +388,9 @@ impl ResultState {
         Ok(self.columns.clone())
     }
 
-    fn recover_prepared(&mut self) -> Result<PreparedOwner> {
+    fn recover_statement(&mut self) -> Result<StatementOwner> {
         match std::mem::replace(&mut self.resource, Resource::Failed) {
-            Resource::Prepared(owner) => Ok(owner),
+            Resource::Ready(owner) => Ok(owner),
             Resource::Active(mut active) => {
                 if let Err(error) =
                     active.with_fetcher_mut(|fetcher| fetcher.take().map_or(Ok(()), Fetcher::close))
@@ -404,20 +417,23 @@ impl ResultState {
     /// Scalar execution primitive. Vector/batch scheduling belongs to the DBI
     /// operation layer, not an implicit per-row loop here.
     pub fn execute(&mut self, parameters: Parameters) -> Result<()> {
+        self.check("execute")?;
         let connection = self.connection()?;
-        connection.check("execute")?;
-        if parameters.len() != self.parameter_count {
+        if let Some(expected) = self
+            .parameter_count
+            .filter(|expected| *expected != parameters.len())
+        {
             return Err(DriverError::new(
                 "bind",
                 "parameter",
                 format!(
                     "Expected {} parameters; received {}",
-                    self.parameter_count,
+                    expected,
                     parameters.len()
                 ),
             ));
         }
-        let mut owner = self.recover_prepared()?;
+        let mut owner = self.recover_statement()?;
         owner.parameters = parameters;
         self.delivered = 0;
         self.affected = None;
@@ -425,15 +441,16 @@ impl ResultState {
         self.consumption_error = None;
         self.native_attempt = None;
         let options = connection.options.clone();
+        let sql = &self.sql;
         let kind = self.kind;
         let affected = Cell::new(None);
         let attempt_id = identity();
         let attempt = RefCell::new(None);
         let active: Result<ActiveResult> = ActiveResultTryBuilder {
             owner,
-            fetcher_builder: |owner: &mut PreparedOwner| {
+            fetcher_builder: |owner: &mut StatementOwner| {
                 let start = Instant::now();
-                let result = owner.statement.execute(owner.parameters.as_slice());
+                let result = owner.statement.execute(sql, owner.parameters.as_slice());
                 let duration_seconds = start.elapsed().as_secs_f64();
                 let outcome = match &result {
                     Ok(_) => "success",
@@ -485,7 +502,7 @@ impl ResultState {
                     } else {
                         Ok(None)
                     };
-                    self.resource = Resource::Prepared(owner);
+                    self.resource = Resource::Ready(owner);
                     match affected {
                         Ok(n) => self.affected = n,
                         Err(error) => {
@@ -527,7 +544,7 @@ impl ResultState {
                     .ok_or_else(|| invalid("fetch", "No cursor"))?
                     .fetch(limit)
             }),
-            Resource::Prepared(_) if self.native_attempt.is_some() => Ok(vec![]),
+            Resource::Ready(_) if self.native_attempt.is_some() => Ok(vec![]),
             _ => {
                 return Err(invalid(
                     "fetch",
@@ -558,7 +575,7 @@ impl ResultState {
             Resource::Active(active) => {
                 active.with_fetcher(|f| f.as_ref().is_none_or(Fetcher::complete))
             }
-            Resource::Prepared(_) => self.native_attempt.is_some(),
+            Resource::Ready(_) => self.native_attempt.is_some(),
             _ => false,
         }
     }

@@ -158,7 +158,7 @@ fn native_connect(connection_string: String, config: List) -> List {
 }
 
 #[extendr]
-fn native_prepare(ptr: Robj, sql: String, statement: bool) -> List {
+fn native_prepare(ptr: Robj, sql: String, statement: bool, immediate: bool) -> List {
     boundary(|| {
         let conn = connection(ptr)?;
         let _guard = PoisonOnUnwind(conn.clone());
@@ -170,7 +170,7 @@ fn native_prepare(ptr: Robj, sql: String, statement: bool) -> List {
         } else {
             ResultKind::Query
         };
-        Ok(ExternalPtr::new(ResultHandle(conn.prepare(sql, kind)?)).into())
+        Ok(ExternalPtr::new(ResultHandle(conn.prepare(sql, kind, immediate)?)).into())
     })
 }
 
@@ -180,6 +180,7 @@ fn native_bind_scalar(ptr: Robj, parameters: Robj) -> List {
         let result = result(ptr)?;
         let (conn, count) = {
             let result = result.try_borrow().map_err(|_| busy())?;
+            result.check("bind")?;
             (result.connection()?, result.parameter_count)
         };
         let _guard = PoisonOnUnwind(conn.clone());
@@ -188,7 +189,6 @@ fn native_bind_scalar(ptr: Robj, parameters: Robj) -> List {
         if batch.rows.len() != 1 {
             return Err(DriverError::new("bind", "parameter", "This private scalar primitive requires exactly one parameter row; batch execution is a separate operation"));
         }
-        debug_assert_eq!(batch.column_count, count);
         result
             .try_borrow_mut()
             .map_err(|_| busy())?
@@ -395,6 +395,8 @@ fn native_result_info(ptr: Robj) -> List {
                 "statement"
             },
             executed = state.native_attempt.is_some(),
+            parameter_count = state.parameter_count.map(|n| n as i32),
+            immediate = state.immediate,
             statement = state.sql.clone(),
             native_attempt = attempt,
             consumption_failed = state.consumption_error.is_some(),

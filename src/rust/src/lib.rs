@@ -5,6 +5,7 @@ mod error;
 mod fetch;
 mod parameters;
 mod state;
+mod statement;
 mod types;
 
 /// Return string `"Hello world!"` to R.

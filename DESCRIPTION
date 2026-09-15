@@ -6,6 +6,7 @@ Author: Adam Smielewski [aut, cre]
 Maintainer: Adam Smielewski <adam@blyedev.com>
 Description: Connect to ODBC Compatible Databases
 License: MIT + file LICENSE
+Encoding: UTF-8
 Depends:
     R (>= 4.2)
 Imports:

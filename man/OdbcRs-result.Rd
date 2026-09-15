@@ -8,8 +8,8 @@
 \alias{dbColumnInfo,OdbcRsResult-method}
 \alias{dbGetStatement,OdbcRsResult-method}
 \title{Fetch and manage a Rust-backed ODBC result}
-\description{Access a native-backed result's rows, metadata, counts, and lifecycle.
-Public query execution is not yet wired; result construction is currently private.}
+\description{Access rows, metadata, counts, and lifecycle state for a result
+created by dbSendQuery() or dbSendStatement().}
 \usage{
 \S4method{dbFetch}{OdbcRsResult,ANY}(res, n = -1, ...)
 \S4method{dbClearResult}{OdbcRsResult}(res, ...)

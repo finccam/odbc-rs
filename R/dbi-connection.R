@@ -1,7 +1,7 @@
 #' Connect and inspect Rust-backed ODBC objects
 #'
-#' Connections use the same named ODBC attribute conventions as odbc. Public
-#' execution methods are implemented in the following batch.
+#' Connections use the same named ODBC attribute conventions as odbc and support
+#' scalar query and statement execution.
 #' @rdname OdbcRs-connection
 #' @export
 setMethod("dbConnect", "OdbcRsDriver", function(

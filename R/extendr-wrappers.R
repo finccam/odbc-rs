@@ -12,7 +12,7 @@ hello_world <- function() .Call(wrap__hello_world)
 #' Private connection primitive; does not construct a public DBI object.
 native_connect <- function(connection_string, config) .Call(wrap__native_connect, connection_string, config)
 
-native_prepare <- function(ptr, sql, statement) .Call(wrap__native_prepare, ptr, sql, statement)
+native_prepare <- function(ptr, sql, statement, immediate) .Call(wrap__native_prepare, ptr, sql, statement, immediate)
 
 native_bind_scalar <- function(ptr, parameters) .Call(wrap__native_bind_scalar, ptr, parameters)
 
