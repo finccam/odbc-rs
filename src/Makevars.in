@@ -1,7 +1,7 @@
 TARGET_DIR = ./rust/target
 LIBDIR = $(TARGET_DIR)/@LIBDIR@
 STATLIB = $(LIBDIR)/libodbc_rs.a
-PKG_LIBS = -L$(LIBDIR) -lodbc_rs
+PKG_LIBS = -L$(LIBDIR) -lodbc_rs -lodbc
 
 all: $(SHLIB) rust_clean
 

@@ -1,5 +1,13 @@
 use extendr_api::prelude::*;
 
+mod bridge;
+mod error;
+mod fetch;
+mod parameters;
+mod state;
+mod statement;
+mod types;
+
 /// Return string `"Hello world!"` to R.
 /// @export
 #[extendr]
@@ -12,5 +20,6 @@ fn hello_world() -> &'static str {
 // See corresponding C code in `entrypoint.c`.
 extendr_module! {
     mod odbc_rs;
+    use bridge;
     fn hello_world;
 }
