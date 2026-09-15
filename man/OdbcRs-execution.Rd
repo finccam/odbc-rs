@@ -6,7 +6,7 @@
 \alias{dbBind,OdbcRsResult-method}
 \alias{dbGetQuery,OdbcRsConnection,character-method}
 \alias{dbExecute,OdbcRsConnection,character-method}
-\title{Execute SQL and bind scalar parameters}
+\title{Execute SQL and bind parameters}
 \usage{
 \S4method{dbSendQuery}{OdbcRsConnection,character}(conn, statement, params = NULL, ..., immediate = FALSE)
 
@@ -30,7 +30,7 @@
 
 \item{statement}{A single SQL string, optionally wrapped in DBI::SQL().}
 
-\item{params}{A positional list of scalar parameter columns or a one-row data
+\item{params}{A positional list of equally sized parameter columns or a data
 frame. Names do not select placeholders. For send/convenience methods, NULL
 means no supplied parameters. Binary values use a list-column of raw vectors
 or NULL; use an R missing value for a scalar SQL NULL of other types.}
@@ -39,7 +39,7 @@ or NULL; use an R missing value for a scalar SQL NULL of other types.}
 
 \item{immediate}{TRUE uses direct execution, FALSE prepares the statement.
 NULL selects the method's default: FALSE for send methods; TRUE without
-params and FALSE with params for convenience methods. Supplied scalar
+params and FALSE with params for convenience methods. Supplied
 parameters are also bound on the direct path; they are not ignored.}
 
 \item{res}{An OdbcRsResult returned by a send method.}
@@ -68,10 +68,15 @@ and conversion validation occurs before closing the old cursor where possible.
 Native execution failure invalidates the result; clear it and create a new
 result. A failed query never causes an automatic retry or reconnection.
 
-This batch supports scalar binding only. Zero-row and multirow parameter
-batches, table-valued parameters, query cancellation, and R interruption of
-native execution are not implemented. Unsupported parameter batches fail
-before execution instead of silently running a subset of their rows.
+Multirow input uses one native parameter-array execution, not a loop over
+individual rows. Prepared zero-row batches perform no execution and produce
+typed empty query output or zero affected rows. Empty direct query batches
+require prepared mode to obtain metadata and are rejected before rebinding.
+Table-valued parameters, cancellation, and interruption are not implemented.
+Batch queries concatenate compatible driver result sets while retaining
+bounded fetching. Different result schemas produce an error. Batch failures
+expose available processed/successful parameter counts and uncertainty; no
+automatic retry or hidden transaction is introduced.
 
 Convenience methods compose the send/bind/fetch/count/clear lifecycle and
 always clear their result. On an execution, fetch, or R error, cleanup failures
@@ -82,7 +87,8 @@ re-executing the query. Invalid n arguments fail before executing SQL.
 Whether an execution yields rows is determined by ODBC, not its first SQL
 keyword. Query-origin results expose fetched rows; statement-origin results
 expose affected counts. Use dbSendQuery()/dbGetQuery() for statements whose
-returned rows you want to fetch. Multiple-result-set traversal is not provided.
+returned rows you want to fetch. General multiple-result-set APIs are not
+provided; traversal is internal to native parameter batches.
 }
 \seealso{
 \code{\link{OdbcRs-result}}, \code{\link{OdbcRs-connection}}

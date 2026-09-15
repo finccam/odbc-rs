@@ -1,7 +1,7 @@
 #' Connect and inspect Rust-backed ODBC objects
 #'
 #' Connections use the same named ODBC attribute conventions as odbc and support
-#' scalar query and statement execution.
+#' query and statement execution, parameter batches, and table operations.
 #' @rdname OdbcRs-connection
 #' @export
 setMethod("dbConnect", "OdbcRsDriver", function(
@@ -33,7 +33,7 @@ setMethod("dbConnect", "OdbcRsDriver", function(
   ptr <- .native_connect(text, config)
   installed <- FALSE
   on.exit(if (!installed) try(.native_disconnect(ptr), silent = TRUE), add = TRUE)
-  conn <- new("OdbcRsConnection", ptr = ptr, timezone = config$timezone)
+  conn <- new("OdbcRsConnection", ptr = ptr, timezone = config$timezone, table_state = new.env(parent = emptyenv()))
   # This callback captures no connection or pointer. It reports abandonment but
   # leaves the lifetime of a session retained by live results to native ownership.
   reg.finalizer(ptr, .finalize_connection, onexit = TRUE)

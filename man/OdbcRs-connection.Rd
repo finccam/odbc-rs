@@ -13,7 +13,7 @@
 \alias{show,OdbcRsResult-method}
 \title{Connect and inspect Rust-backed ODBC objects}
 \description{Open a native ODBC connection, inspect its state, and release it.
-Use the public execution methods to send queries and bind scalar parameters.}
+Use the public execution methods to send queries and bind parameters.}
 \usage{
 \S4method{dbConnect}{OdbcRsDriver}(drv, dsn = NULL, ...,
   timezone = "UTC", timezone_out = "UTC",

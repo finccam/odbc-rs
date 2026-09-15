@@ -8,7 +8,7 @@ use crate::{
 };
 use odbc_api::{
     handles::{AsStatementRef, Statement},
-    Connection, ConnectionOptions, ConnectionTransitions,
+    Connection, ConnectionOptions, ConnectionTransitions, Cursor,
 };
 use ouroboros::self_referencing;
 use std::{
@@ -60,6 +60,13 @@ pub struct ConnectionInfo {
     pub database: Option<String>,
 }
 
+pub struct TableEntry {
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
+    pub name: String,
+    pub table_type: String,
+}
+
 pub struct ConnectionState {
     pub id: u64,
     pub pid: u32,
@@ -88,6 +95,8 @@ pub struct ResultState {
     pub affected: Option<usize>,
     pub native_attempt: Option<NativeAttempt>,
     pub consumption_error: Option<DriverError>,
+    pub bound: bool,
+    pub batch_size: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +106,7 @@ pub struct NativeAttempt {
     pub id: u64,
     pub outcome: &'static str,
     pub duration_seconds: f64,
+    pub batch_size: usize,
 }
 
 fn invalid(operation: &'static str, message: &str) -> DriverError {
@@ -184,13 +194,15 @@ impl ConnectionState {
             kind,
             resource: Resource::Ready(StatementOwner {
                 statement,
-                parameters: vec![],
+                parameters: Parameters::default(),
             }),
             columns: vec![],
             delivered: 0,
             affected: None,
             native_attempt: None,
             consumption_error: None,
+            bound: false,
+            batch_size: 0,
         }));
         let mut registry = self.results.borrow_mut();
         registry.retain(|r| r.strong_count() > 0);
@@ -262,6 +274,52 @@ impl ConnectionState {
             dbms_name,
             database,
         })
+    }
+
+    pub fn tables(&self, catalog: &str, schema: &str, table: &str) -> Result<Vec<TableEntry>> {
+        self.check("tables")?;
+        let native = self.native.borrow();
+        let native = native
+            .as_ref()
+            .ok_or_else(|| invalid("tables", "Connection is closed"))?;
+        let catalog = if catalog.is_empty() {
+            native
+                .current_catalog()
+                .map_err(|e| DriverError::odbc("tables", e))?
+        } else {
+            catalog.to_owned()
+        };
+        let mut statement = native
+            .preallocate()
+            .map_err(|e| DriverError::odbc("tables", e))?;
+        let mut cursor = statement
+            .tables_cursor(&catalog, schema, table, "TABLE,VIEW")
+            .map_err(|e| DriverError::odbc("tables", e))?;
+        let mut entries = vec![];
+        while let Some(mut row) = cursor
+            .next_row()
+            .map_err(|e| DriverError::odbc("tables", e))?
+        {
+            let mut text = |index| -> Result<Option<String>> {
+                let mut units = vec![];
+                if !row
+                    .get_wide_text(index, &mut units)
+                    .map_err(|e| DriverError::odbc("tables", e))?
+                {
+                    return Ok(None);
+                }
+                Ok(Some(String::from_utf16(&units).map_err(|_| {
+                    invalid("tables", "Invalid metadata encoding")
+                })?))
+            };
+            entries.push(TableEntry {
+                catalog: text(1)?,
+                schema: text(2)?,
+                name: text(3)?.ok_or_else(|| invalid("tables", "Missing table name"))?,
+                table_type: text(4)?.unwrap_or_default(),
+            });
+        }
+        Ok(entries)
     }
 
     pub fn close(&self) -> Result<()> {
@@ -346,8 +404,8 @@ impl ResultState {
             Resource::Cleared => "cleared",
             Resource::Failed => "failed",
             _ if !self.valid() => "invalid",
-            _ if self.kind == ResultKind::Statement && self.native_attempt.is_some() => "completed",
-            Resource::Ready(_) if self.native_attempt.is_none() => {
+            _ if self.kind == ResultKind::Statement && self.bound => "completed",
+            Resource::Ready(_) if !self.bound => {
                 if self.immediate {
                     "allocated"
                 } else {
@@ -362,7 +420,7 @@ impl ResultState {
 
     pub fn column_info(&mut self) -> Result<Vec<Column>> {
         self.check("column_info")?;
-        if self.native_attempt.is_none() {
+        if !self.bound {
             if self.immediate {
                 return Err(invalid(
                     "column_info",
@@ -414,8 +472,7 @@ impl ResultState {
         }
     }
 
-    /// Scalar execution primitive. Vector/batch scheduling belongs to the DBI
-    /// operation layer, not an implicit per-row loop here.
+    /// One native parameter-array execution, never a scalar fallback loop.
     pub fn execute(&mut self, parameters: Parameters) -> Result<()> {
         self.check("execute")?;
         let connection = self.connection()?;
@@ -433,27 +490,61 @@ impl ResultState {
                 ),
             ));
         }
+        let rows = parameters.rows;
+        if rows == 0 && self.kind == ResultKind::Query && self.immediate {
+            return Err(invalid(
+                "bind",
+                "Empty query batches require prepared execution for typed metadata",
+            ));
+        }
         let mut owner = self.recover_statement()?;
+        if let Err(error) = owner.statement.reset_bindings() {
+            connection.status.set(ConnectionStatus::Uncertain);
+            let mut error = DriverError::odbc("bind_reset", error);
+            error.uncertain = true;
+            let _ = release(owner, "bind_reset_cleanup");
+            return Err(error);
+        }
         owner.parameters = parameters;
         self.delivered = 0;
         self.affected = None;
         self.columns.clear();
         self.consumption_error = None;
         self.native_attempt = None;
+        self.bound = false;
+        self.batch_size = rows;
         let options = connection.options.clone();
+        if rows == 0 {
+            self.columns = if self.kind == ResultKind::Query {
+                crate::types::describe(&mut owner.statement, &options)?
+            } else {
+                vec![]
+            };
+            self.affected = Some(0);
+            self.bound = true;
+            self.resource = Resource::Ready(owner);
+            return Ok(());
+        }
         let sql = &self.sql;
         let kind = self.kind;
         let affected = Cell::new(None);
+        let drained = Cell::new(false);
         let attempt_id = identity();
         let attempt = RefCell::new(None);
         let active: Result<ActiveResult> = ActiveResultTryBuilder {
             owner,
             fetcher_builder: |owner: &mut StatementOwner| {
                 let start = Instant::now();
-                let result = owner.statement.execute(sql, owner.parameters.as_slice());
+                let result = owner.statement.execute(sql, &mut owner.parameters);
                 let duration_seconds = start.elapsed().as_secs_f64();
                 let outcome = match &result {
-                    Ok(_) => "success",
+                    Ok(_) => {
+                        if owner.parameters.failure().is_some() {
+                            "failure"
+                        } else {
+                            "success"
+                        }
+                    }
                     Err(error) => match error {
                         odbc_api::Error::Diagnostics { record, .. } => {
                             match record.state.as_str() {
@@ -469,9 +560,27 @@ impl ResultState {
                     id: attempt_id,
                     outcome,
                     duration_seconds,
+                    batch_size: rows,
                 });
-                let cursor = result.map_err(|e| DriverError::odbc("execute", e))?;
+                let cursor = result.map_err(|e| {
+                    let mut error = DriverError::odbc("execute", e);
+                    owner.parameters.annotate_failure(&mut error);
+                    error
+                })?;
+                if let Some(error) = owner.parameters.failure() {
+                    drop(cursor);
+                    return Err(error);
+                }
                 if let Some(mut cursor) = cursor {
+                    if kind == ResultKind::Statement && rows > 1 {
+                        let mut stmt = cursor.into_stmt();
+                        affected.set(drain_affected(&mut stmt).map_err(|mut e| {
+                            owner.parameters.annotate_failure(&mut e);
+                            e
+                        })?);
+                        drained.set(true);
+                        return Ok(None);
+                    }
                     if kind == ResultKind::Statement {
                         let mut statement = cursor.as_stmt_ref();
                         let count = statement
@@ -480,7 +589,7 @@ impl ResultState {
                             .map_err(|e| DriverError::odbc("rows_affected", e))?;
                         affected.set(usize::try_from(count).ok());
                     }
-                    Ok(Some(Fetcher::new(cursor, options)?))
+                    Ok(Some(Fetcher::new(cursor, options, rows > 1)?))
                 } else {
                     Ok(None)
                 }
@@ -490,11 +599,21 @@ impl ResultState {
         self.native_attempt = attempt.into_inner();
         match active {
             Ok(active) => {
+                self.bound = true;
                 self.columns = active
                     .with_fetcher(|f| f.as_ref().map_or_else(Vec::new, |f| f.columns.clone()));
                 if active.with_fetcher(|f| f.is_none()) {
                     let mut owner = active.into_heads().owner;
-                    let affected = if kind == ResultKind::Statement {
+                    let affected = if kind == ResultKind::Statement && rows > 1 {
+                        if drained.get() {
+                            Ok(affected.get())
+                        } else {
+                            drain_affected(&mut owner.statement.as_stmt_ref()).map_err(|mut e| {
+                                owner.parameters.annotate_failure(&mut e);
+                                e
+                            })
+                        }
+                    } else if kind == ResultKind::Statement {
                         owner
                             .statement
                             .row_count()
@@ -502,7 +621,16 @@ impl ResultState {
                     } else {
                         Ok(None)
                     };
+                    let batch_error = owner.parameters.failure();
                     self.resource = Resource::Ready(owner);
+                    if let Some(error) = batch_error {
+                        if let Some(attempt) = &mut self.native_attempt {
+                            attempt.outcome = "failure";
+                        }
+                        let resource = std::mem::replace(&mut self.resource, Resource::Failed);
+                        let _ = release(resource, "batch_cleanup");
+                        return Err(error);
+                    }
                     match affected {
                         Ok(n) => self.affected = n,
                         Err(error) => {
@@ -535,7 +663,7 @@ impl ResultState {
         self.check("fetch")?;
         let connection = self.connection()?;
         connection.check("fetch")?;
-        if self.kind == ResultKind::Statement && self.native_attempt.is_some() {
+        if self.kind == ResultKind::Statement && self.bound {
             return Ok(vec![]);
         }
         let result = match &mut self.resource {
@@ -544,7 +672,9 @@ impl ResultState {
                     .ok_or_else(|| invalid("fetch", "No cursor"))?
                     .fetch(limit)
             }),
-            Resource::Ready(_) if self.native_attempt.is_some() => Ok(vec![]),
+            Resource::Ready(_) if self.bound => {
+                Ok(self.columns.iter().map(|c| Values::empty(c.kind)).collect())
+            }
             _ => {
                 return Err(invalid(
                     "fetch",
@@ -565,17 +695,14 @@ impl ResultState {
     }
 
     pub fn complete(&self) -> bool {
-        if self.kind == ResultKind::Statement
-            && self.has_resource()
-            && self.native_attempt.is_some()
-        {
+        if self.kind == ResultKind::Statement && self.has_resource() && self.bound {
             return true;
         }
         match &self.resource {
             Resource::Active(active) => {
                 active.with_fetcher(|f| f.as_ref().is_none_or(Fetcher::complete))
             }
-            Resource::Ready(_) => self.native_attempt.is_some(),
+            Resource::Ready(_) => self.bound,
             _ => false,
         }
     }
@@ -585,7 +712,7 @@ impl ResultState {
     pub fn has_completed(&mut self) -> Result<bool> {
         self.check("completion")?;
         if self.kind == ResultKind::Statement {
-            return Ok(self.native_attempt.is_some());
+            return Ok(self.bound);
         }
         let outcome = match &mut self.resource {
             Resource::Active(active) => {
@@ -637,6 +764,25 @@ impl ResultState {
 fn unsupported(error: &odbc_api::Error) -> bool {
     matches!(error, odbc_api::Error::Diagnostics { record, .. }
         if matches!(record.state.as_str(), "HYC00" | "HY092" | "HY096" | "IM001" | "S1C00" | "S1092"))
+}
+
+fn drain_affected(stmt: &mut impl Statement) -> Result<Option<usize>> {
+    let mut total = Some(0usize);
+    loop {
+        let n = stmt
+            .row_count()
+            .into_result_without_logging(stmt)
+            .map_err(|e| DriverError::odbc("rows_affected", e))?;
+        total = total.and_then(|total| usize::try_from(n).ok().and_then(|n| total.checked_add(n)));
+        // SAFETY: statement is executed and all parameter/status buffers remain
+        // alive in StatementOwner. SQLMoreResults discards statement-returned rows.
+        if !unsafe { stmt.more_results() }
+            .into_result_bool(stmt)
+            .map_err(|e| DriverError::odbc("batch_results", e))?
+        {
+            return Ok(total);
+        }
+    }
 }
 
 pub fn release<T>(value: T, operation: &'static str) -> Result<()> {

@@ -1,8 +1,8 @@
 #' DBI objects for the Rust-backed ODBC driver
 #'
 #' Connection lifecycle and result access methods use the native resource layer.
-#' SQL Server quoting, type declarations, and scalar execution are supported.
-#' Table and transaction methods remain scaffolded.
+#' SQL Server quoting, type declarations, execution, binding, and table methods
+#' are supported. Transaction methods remain scaffolded.
 #' Connections and results have private external-pointer slots.
 #' @import methods
 #' @import DBI
@@ -14,8 +14,8 @@ setClass("OdbcRsDriver", contains = "DBIDriver")
 setClass(
   "OdbcRsConnection",
   contains = "DBIConnection",
-  slots = c(ptr = "externalptr", timezone = "character"),
-  prototype = list(ptr = new("externalptr"), timezone = "UTC")
+  slots = c(ptr = "externalptr", timezone = "character", table_state = "environment"),
+  prototype = list(ptr = new("externalptr"), timezone = "UTC", table_state = new.env(parent = emptyenv()))
 )
 
 #' @rdname OdbcRsDriver-class
@@ -30,8 +30,8 @@ setClass(
 #' Create a Rust-backed ODBC driver object
 #'
 #' Constructs the driver object without opening a database connection.
-#' Use DBI::dbConnect() to open a connection. Scalar query execution is supported;
-#' batch binding, table methods, and transaction methods are not yet implemented.
+#' Use DBI::dbConnect() to open a connection. Query execution, parameter batches,
+#' and table methods are supported. Transaction methods are not yet implemented.
 #' @return An OdbcRsDriver object.
 #' @export
 odbc_rs <- function() {

@@ -1,13 +1,12 @@
 //! Prepared and direct statements share the same borrowed cursor and buffer path.
 use odbc_api::{
     handles::{AsStatementRef, Statement, StatementConnection, StatementRef},
-    parameter::InputParameter,
     Connection, CursorImpl, Preallocated, Prepared, ResultSetMetadata,
 };
 use std::sync::Arc;
 
 type OwnedHandle = StatementConnection<Arc<Connection<'static>>>;
-pub type Parameters = Vec<Box<dyn InputParameter>>;
+pub use crate::parameters::Parameters;
 
 pub enum NativeStatement {
     Prepared(Prepared<OwnedHandle>),
@@ -18,7 +17,7 @@ impl NativeStatement {
     pub fn execute(
         &mut self,
         sql: &str,
-        parameters: &[Box<dyn InputParameter>],
+        parameters: &mut Parameters,
     ) -> Result<Option<CursorImpl<StatementRef<'_>>>, odbc_api::Error> {
         match self {
             Self::Prepared(statement) => statement.execute(parameters),
@@ -32,6 +31,10 @@ impl NativeStatement {
             .row_count()
             .into_result_without_logging(&statement)?;
         Ok(usize::try_from(count).ok())
+    }
+
+    pub fn reset_bindings(&mut self) -> Result<(), odbc_api::Error> {
+        crate::parameters::reset_bindings(&mut self.as_stmt_ref())
     }
 }
 

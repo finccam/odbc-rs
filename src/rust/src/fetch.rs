@@ -7,7 +7,7 @@ use odbc_api::{
     buffers::ColumnarDynBuffer,
     handles::{Statement, StatementRef},
     sys::{Date, Timestamp},
-    Bit, BlockCursor, Cursor, CursorImpl, CursorRow, Nullable,
+    Bit, BlockCursor, Cursor, CursorImpl, CursorRow, Nullable, ResultSetMetadata,
 };
 
 type BorrowedCursor<'a> = CursorImpl<StatementRef<'a>>;
@@ -17,17 +17,21 @@ enum Source<'a> {
 }
 
 pub struct Fetcher<'a> {
-    source: Source<'a>,
+    source: Option<Source<'a>>,
     pub columns: Vec<Column>,
     options: Options,
     pending: Vec<Values>,
     offset: usize,
     eof: bool,
+    batch_results: bool,
 }
 
 impl<'a> Fetcher<'a> {
     pub fn close(self) -> Result<()> {
-        let cursor = match self.source {
+        let Some(source) = self.source else {
+            return Ok(());
+        };
+        let cursor = match source {
             Source::Block(cursor) => {
                 cursor
                     .unbind()
@@ -45,7 +49,11 @@ impl<'a> Fetcher<'a> {
             .map_err(|e| DriverError::odbc("clear", e))
     }
 
-    pub fn new(mut cursor: BorrowedCursor<'a>, options: Options) -> Result<Self> {
+    pub fn new(
+        mut cursor: BorrowedCursor<'a>,
+        options: Options,
+        batch_results: bool,
+    ) -> Result<Self> {
         let columns = types::describe(&mut cursor, &options)?;
         let descs: Option<Vec<_>> = columns.iter().map(|c| c.buffer).collect();
         let source = if let Some(descs) = descs {
@@ -70,12 +78,13 @@ impl<'a> Fetcher<'a> {
         };
         let pending = columns.iter().map(|c| Values::empty(c.kind)).collect();
         Ok(Self {
-            source,
+            source: Some(source),
             columns,
             options,
             pending,
             offset: 0,
             eof: false,
+            batch_results,
         })
     }
 
@@ -98,28 +107,85 @@ impl<'a> Fetcher<'a> {
         // buffer is reused; pending contains owned values, never references into it.
         self.pending = self.columns.iter().map(|c| Values::empty(c.kind)).collect();
         self.offset = 0;
-        match &mut self.source {
-            Source::Block(cursor) => {
-                match cursor
-                    .fetch_with_truncation_check(true)
-                    .map_err(|e| DriverError::odbc("fetch", e))?
-                {
-                    Some(batch) => {
-                        self.pending = decode_block(batch, &self.columns, &self.options)?
+        loop {
+            match self.source.as_mut() {
+                None => {
+                    self.eof = true;
+                    break;
+                }
+                Some(Source::Block(cursor)) => {
+                    match cursor
+                        .fetch_with_truncation_check(true)
+                        .map_err(|e| DriverError::odbc("fetch", e))?
+                    {
+                        Some(batch) => {
+                            self.pending = decode_block(batch, &self.columns, &self.options)?
+                        }
+                        None => self.eof = true,
                     }
-                    None => self.eof = true,
+                }
+                Some(Source::Row(cursor)) => {
+                    match cursor
+                        .next_row()
+                        .map_err(|e| DriverError::odbc("fetch", e))?
+                    {
+                        Some(mut row) => {
+                            self.pending = decode_row(&mut row, &self.columns, &self.options)?
+                        }
+                        None => self.eof = true,
+                    }
                 }
             }
-            Source::Row(cursor) => {
-                match cursor
-                    .next_row()
-                    .map_err(|e| DriverError::odbc("fetch", e))?
-                {
-                    Some(mut row) => {
-                        self.pending = decode_row(&mut row, &self.columns, &self.options)?
-                    }
-                    None => self.eof = true,
+            if !self.eof || !self.batch_results {
+                break;
+            }
+            let source = self.source.take().unwrap();
+            let cursor = match source {
+                Source::Block(cursor) => {
+                    cursor
+                        .unbind()
+                        .map_err(|e| DriverError::odbc("batch_fetch", e))?
+                        .0
                 }
+                Source::Row(cursor) => cursor,
+            };
+            let mut next = cursor
+                .more_results()
+                .map_err(|e| DriverError::odbc("batch_fetch", e))?;
+            while let Some(mut cursor) = next {
+                if cursor
+                    .num_result_cols()
+                    .map_err(|e| DriverError::odbc("batch_fetch", e))?
+                    > 0
+                {
+                    let mut next_fetcher = Self::new(cursor, self.options.clone(), true)?;
+                    if next_fetcher.columns.len() != self.columns.len()
+                        || next_fetcher
+                            .columns
+                            .iter()
+                            .zip(&self.columns)
+                            .any(|(a, b)| {
+                                a.name != b.name
+                                    || a.kind != b.kind
+                                    || a.native_type != b.native_type
+                            })
+                    {
+                        return Err(DriverError::new(
+                            "batch_fetch",
+                            "conversion",
+                            "Parameter batch produced incompatible result schemas",
+                        ));
+                    }
+                    self.source = next_fetcher.source.take();
+                    self.eof = false;
+                    break;
+                }
+                next = cursor
+                    .more_results()
+                    .map_err(|e| DriverError::odbc("batch_fetch", e))?;
+            }
+            if self.eof {
+                break;
             }
         }
         // An empty successful rowset must not cause an unbounded refill loop.

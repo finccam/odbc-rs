@@ -21,7 +21,7 @@
   .native_value(.Call(wrap__native_prepare, ptr, enc2utf8(sql), statement, immediate))
 }
 
-.native_bind_scalar <- function(ptr, params = list()) {
+.native_bind <- function(ptr, params = list()) {
   # Normalize R text encodings before the Rust-owned UTF-16 conversion. Preserve
   # factors' missingness and labels without treating their codes as integers.
   if (is.list(params)) {
@@ -31,7 +31,16 @@
       x
     })
   }
-  .native_value(.Call(wrap__native_bind_scalar, ptr, params))
+  .native_value(.Call(wrap__native_bind, ptr, params))
+}
+
+.native_validate_parameters <- function(ptr, params) {
+  params <- lapply(params, function(x) {
+    if (is.factor(x)) x <- as.character(x)
+    if (is.character(x)) x <- enc2utf8(x)
+    x
+  })
+  .native_value(.Call(wrap__native_validate_parameters, ptr, params))
 }
 
 .native_fetch <- function(ptr, n = -1) {
@@ -72,6 +81,10 @@
 
 .native_column_info <- function(ptr) {
   .native_value(.Call(wrap__native_column_info, ptr))
+}
+
+.native_tables <- function(ptr, catalog = "", schema = "%", table = "%") {
+  .native_value(.Call(wrap__native_tables, ptr, enc2utf8(catalog), enc2utf8(schema), enc2utf8(table)))
 }
 
 # This helper only allocates/prepares. Send methods execute on the same pointer.

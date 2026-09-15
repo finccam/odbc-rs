@@ -11,6 +11,10 @@ pub struct DriverError {
     pub sqlstate: Option<String>,
     pub native_code: Option<i32>,
     pub uncertain: bool,
+    pub batch_size: Option<usize>,
+    pub batch_processed: Option<usize>,
+    pub batch_succeeded: Option<usize>,
+    pub batch_outcome_uncertain: bool,
 }
 
 impl DriverError {
@@ -22,6 +26,10 @@ impl DriverError {
             sqlstate: None,
             native_code: None,
             uncertain: false,
+            batch_size: None,
+            batch_processed: None,
+            batch_succeeded: None,
+            batch_outcome_uncertain: false,
         }
     }
 
@@ -49,6 +57,10 @@ impl DriverError {
             sqlstate,
             native_code: record.map(|r| r.native_error),
             uncertain,
+            batch_size: None,
+            batch_processed: None,
+            batch_succeeded: None,
+            batch_outcome_uncertain: false,
         }
     }
 }

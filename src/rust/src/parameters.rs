@@ -1,235 +1,394 @@
-//! Copy and validate all input before touching an existing cursor or executing SQL.
+//! Owned column-wise ODBC parameters. Validation/conversion precedes execution.
 use crate::{
-    error::{DriverError, Result as NativeResult},
-    statement::Parameters,
+    error::{DriverError, Result},
     types::{self, Options},
 };
 use extendr_api::prelude::*;
 use odbc_api::{
-    parameter::{InputParameter, VarBinaryBox, VarWCharBox, WithDataType},
-    Bit, DataType, Nullable as SqlNullable,
+    buffers::{BinColumn, TextColumn},
+    handles::{CData, HasDataType, SqlResult, Statement},
+    parameter::WithDataType,
+    sys, Bit, DataType, ParameterCollectionRef, Pod,
 };
+use std::{ffi::c_void, num::NonZeroUsize};
 
-pub struct ParameterBatch {
-    pub rows: Vec<Parameters>,
+trait ArrayColumn: CData + HasDataType + Send {}
+impl<T: CData + HasDataType + Send> ArrayColumn for T {}
+
+pub struct Parameters {
+    columns: Vec<Box<dyn ArrayColumn>>,
+    pub rows: usize,
+    statuses: Vec<u16>,
+    processed: Box<usize>,
 }
 
-impl ParameterBatch {
-    pub fn from_r(input: &Robj, expected: Option<usize>, options: &Options) -> NativeResult<Self> {
-        let input = input
+impl Default for Parameters {
+    fn default() -> Self {
+        Self {
+            columns: vec![],
+            rows: 1,
+            statuses: vec![u16::MAX],
+            processed: Box::new(usize::MAX),
+        }
+    }
+}
+
+impl Parameters {
+    pub fn len(&self) -> usize {
+        self.columns.len()
+    }
+    pub fn from_r(input: &Robj, expected: Option<usize>, options: &Options) -> Result<Self> {
+        let list = input
             .as_list()
             .ok_or_else(|| parameter("Parameters must be a list or data frame"))?;
-        if let Some(expected) = expected.filter(|expected| *expected != input.len()) {
-            return Err(parameter(format!(
-                "Expected {expected} parameter columns; received {}",
-                input.len()
-            )));
+        if expected.is_some_and(|n| n != list.len()) {
+            return Err(parameter(
+                "Parameter count does not match the prepared statement",
+            ));
         }
-        let n = input.values().next().map_or(1, |x| x.len());
-        if input.values().any(|x| x.len() != n) {
-            return Err(parameter("All parameter columns must have the same length"));
+        if list.len() > u16::MAX as usize {
+            return Err(parameter("Too many parameter columns"));
         }
-        // Reject batches before allocating/converting their values. A later
-        // native array path will own batch execution; never loop scalar writes.
-        if n != 1 {
-            return Err(parameter("Scalar binding requires one row; zero-row and multirow parameter batches are not implemented"));
+        let rows = list.values().next().map_or(1, |x| x.len());
+        if list.values().any(|x| x.len() != rows) {
+            return Err(parameter("Parameter columns must have equal lengths"));
         }
-        let mut rows: Vec<Parameters> = (0..n).map(|_| Vec::with_capacity(input.len())).collect();
-        for column in input.values() {
-            let converted = convert_column(&column, options)?;
-            for (row, value) in rows.iter_mut().zip(converted) {
-                row.push(value);
-            }
+        let columns = list
+            .values()
+            .map(|column| convert(&column, options))
+            .collect::<Result<_>>()?;
+        Ok(Self {
+            columns,
+            rows,
+            statuses: vec![u16::MAX; rows],
+            processed: Box::new(usize::MAX),
+        })
+    }
+
+    pub fn annotate_failure(&self, error: &mut DriverError) {
+        if self.rows <= 1 {
+            return;
         }
-        Ok(Self { rows })
+        error.batch_size = Some(self.rows);
+        error.batch_processed = (*self.processed <= self.rows).then_some(*self.processed);
+        if self.statuses.iter().any(|s| matches!(s, 0 | 1 | 5 | 6 | 7)) {
+            error.batch_succeeded =
+                Some(self.statuses.iter().filter(|s| matches!(s, 0 | 6)).count());
+        }
+        error.batch_outcome_uncertain = true;
+    }
+
+    pub fn failure(&self) -> Option<DriverError> {
+        if self.rows <= 1 || !self.statuses.iter().any(|s| matches!(s, 1 | 5)) {
+            return None;
+        }
+        let mut error = DriverError::new(
+            "execute",
+            "batch",
+            "ODBC reported one or more failed parameter rows; some rows may have succeeded",
+        );
+        self.annotate_failure(&mut error);
+        Some(error)
     }
 }
 
-fn parameter(message: impl Into<String>) -> DriverError {
-    DriverError::new("bind", "parameter", message)
+pub fn reset_bindings(stmt: &mut impl Statement) -> std::result::Result<(), odbc_api::Error> {
+    set_attr(
+        stmt,
+        sys::StatementAttribute::ParamStatusPtr,
+        std::ptr::null_mut(),
+    )?;
+    set_attr(
+        stmt,
+        sys::StatementAttribute::ParamsProcessedPtr,
+        std::ptr::null_mut(),
+    )?;
+    stmt.reset_parameters().into_result_without_logging(stmt)
 }
 
-fn boxed<T: InputParameter + 'static>(value: T) -> Box<dyn InputParameter> {
-    Box::new(value)
-}
-
-fn numeric_values(column: &Robj) -> NativeResult<Vec<Option<f64>>> {
-    if let Some(values) = column.as_real_slice() {
-        Ok(values
-            .iter()
-            .map(|v| if v.is_na() { None } else { Some(*v) })
-            .collect())
-    } else if let Some(values) = column.as_integer_slice() {
-        Ok(values
-            .iter()
-            .map(|v| if v.is_na() { None } else { Some(*v as f64) })
-            .collect())
-    } else {
-        Err(parameter("Expected a numeric vector"))
+fn set_attr(
+    stmt: &mut impl Statement,
+    attr: sys::StatementAttribute,
+    ptr: *mut c_void,
+) -> std::result::Result<(), odbc_api::Error> {
+    // Valid statement; pointer attributes are either null or owned output arrays
+    // retained in StatementOwner until reset_bindings or statement destruction.
+    match unsafe { sys::SQLSetStmtAttr(stmt.as_sys(), attr, ptr, 0) } {
+        sys::SqlReturn::SUCCESS | sys::SqlReturn::SUCCESS_WITH_INFO => Ok(()),
+        _ => SqlResult::Error {
+            function: "SQLSetStmtAttr",
+        }
+        .into_result_without_logging(stmt),
     }
 }
 
-fn convert_column(column: &Robj, options: &Options) -> NativeResult<Parameters> {
-    if column.inherits("integer64") {
-        let data = column
-            .as_real_slice()
-            .ok_or_else(|| parameter("integer64 must use double storage"))?;
-        return Ok(data
+// SAFETY: every column has exactly rows initialized values and indicators. Text
+// and binary buffers are sized from all input values and never truncated. The
+// enclosing StatementOwner keeps inputs/output-status storage alive until its
+// cursor is closed and bindings reset; R memory is never bound to ODBC.
+unsafe impl ParameterCollectionRef for &mut Parameters {
+    fn parameter_set_size(&self) -> usize {
+        self.rows
+    }
+    unsafe fn bind_parameters_to(
+        &mut self,
+        stmt: &mut impl Statement,
+    ) -> std::result::Result<(), odbc_api::Error> {
+        set_attr(
+            stmt,
+            sys::StatementAttribute::ParamBindType,
+            std::ptr::null_mut(),
+        )?;
+        set_attr(
+            stmt,
+            sys::StatementAttribute::ParamStatusPtr,
+            self.statuses.as_mut_ptr().cast(),
+        )?;
+        set_attr(
+            stmt,
+            sys::StatementAttribute::ParamsProcessedPtr,
+            (&mut *self.processed as *mut usize).cast(),
+        )?;
+        for (i, column) in self.columns.iter().enumerate() {
+            unsafe { stmt.bind_input_parameter((i + 1) as u16, column.as_ref()) }
+                .into_result_without_logging(stmt)?;
+        }
+        Ok(())
+    }
+}
+
+struct Fixed<T> {
+    values: Vec<T>,
+    indicators: Vec<isize>,
+}
+// SAFETY: Pod defines the ODBC layout/stride; both vectors have equal length and
+// remain stable while bound. SQL_PARAM_INPUT prevents writes to their contents.
+unsafe impl<T: Pod> CData for Fixed<T> {
+    fn cdata_type(&self) -> sys::CDataType {
+        T::C_DATA_TYPE
+    }
+    fn value_ptr(&self) -> *const c_void {
+        self.values.as_ptr().cast()
+    }
+    fn indicator_ptr(&self) -> *const isize {
+        self.indicators.as_ptr()
+    }
+    fn buffer_length(&self) -> isize {
+        std::mem::size_of::<T>() as isize
+    }
+}
+
+fn fixed<T: Pod>(values: Vec<Option<T>>, data_type: DataType) -> Box<dyn ArrayColumn> {
+    let indicators = values
+        .iter()
+        .map(|x| if x.is_some() { 0 } else { sys::NULL_DATA })
+        .collect();
+    Box::new(WithDataType {
+        value: Fixed {
+            values: values.into_iter().map(Option::unwrap_or_default).collect(),
+            indicators,
+        },
+        data_type,
+    })
+}
+
+fn text(values: Vec<Option<String>>, data_type: Option<DataType>) -> Result<Box<dyn ArrayColumn>> {
+    let values: Vec<Option<Vec<u16>>> = values
+        .into_iter()
+        .map(|s| s.map(|s| s.encode_utf16().collect()))
+        .collect();
+    let width = values
+        .iter()
+        .flatten()
+        .map(Vec::len)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let mut buffer = TextColumn::<u16>::try_new(values.len(), width)
+        .map_err(|_| parameter("Parameter text allocation is too large"))?;
+    for (i, value) in values.iter().enumerate() {
+        buffer.set_value(i, value.as_deref());
+    }
+    let data_type =
+        data_type.unwrap_or_else(|| odbc_api::BindParamDesc::wide_text(width).data_type);
+    Ok(Box::new(WithDataType {
+        value: buffer,
+        data_type,
+    }))
+}
+
+fn numbers(column: &Robj) -> Result<Vec<Option<f64>>> {
+    if let Some(v) = column.as_real_slice() {
+        return Ok(v
             .iter()
-            .map(|v| {
-                // integer64 uses the bits of a REALSXP slot, not its floating value.
-                let v = v.to_bits() as i64;
-                boxed(if v == i64::MIN {
-                    SqlNullable::<i64>::null()
-                } else {
-                    SqlNullable::new(v)
-                })
-            })
+            .map(|&x| if x.is_na() { None } else { Some(x) })
             .collect());
     }
+    if let Some(v) = column.as_integer_slice() {
+        return Ok(v
+            .iter()
+            .map(|&x| if x.is_na() { None } else { Some(x as f64) })
+            .collect());
+    }
+    Err(parameter("Expected numeric parameter storage"))
+}
+
+fn convert(column: &Robj, options: &Options) -> Result<Box<dyn ArrayColumn>> {
+    if column.inherits("integer64") {
+        let v = column
+            .as_real_slice()
+            .ok_or_else(|| parameter("Invalid integer64 storage"))?;
+        return Ok(fixed(
+            v.iter()
+                .map(|x| {
+                    let n = x.to_bits() as i64;
+                    (n != i64::MIN).then_some(n)
+                })
+                .collect(),
+            DataType::BigInt,
+        ));
+    }
     if column.inherits("Date") {
-        return numeric_values(column)?
-            .into_iter()
-            .map(|v| {
-                let v = v.map(types::days_to_date).transpose()?;
-                Ok(boxed(v.map_or_else(SqlNullable::null, SqlNullable::new)))
-            })
-            .collect();
+        return Ok(fixed(
+            numbers(column)?
+                .into_iter()
+                .map(|x| x.map(types::days_to_date).transpose())
+                .collect::<Result<_>>()?,
+            DataType::Date,
+        ));
     }
     if column.inherits("POSIXct") {
-        return numeric_values(column)?
+        let values = numbers(column)?
             .into_iter()
-            .map(|v| {
-                let v = v
-                    .map(|v| types::seconds_to_timestamp(v, options.timezone))
-                    .transpose()?;
-                Ok(boxed(WithDataType {
-                    value: v.map_or_else(SqlNullable::null, SqlNullable::new),
-                    data_type: DataType::Timestamp { precision: 9 },
-                }))
+            .map(|x| {
+                x.map(|x| {
+                    let mut ts = types::seconds_to_timestamp(x, options.timezone)?;
+                    ts.fraction -= ts.fraction % 100;
+                    Ok(ts)
+                })
+                .transpose()
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
+        return Ok(fixed(values, DataType::Timestamp { precision: 7 }));
     }
     if column.inherits("difftime") {
         let units = column
             .get_attrib("units")
             .and_then(|v| v.as_str().map(str::to_owned))
             .ok_or_else(|| parameter("difftime requires units"))?;
-        let multiplier = match units.as_str() {
+        let scale = match units.as_str() {
             "secs" => 1.0,
             "mins" => 60.0,
             "hours" => 3600.0,
             "days" => 86400.0,
             "weeks" => 604800.0,
-            _ => return Err(parameter("Unsupported difftime units")),
+            _ => return Err(parameter("Invalid time units")),
         };
-        return numeric_values(column)?
+        let values = numbers(column)?
             .into_iter()
-            .map(|v| {
-                let text = match v {
-                    None => VarWCharBox::null(),
-                    Some(v) => {
-                        let v = v * multiplier;
-                        if !v.is_finite() || !(0.0..86400.0).contains(&v) {
-                            return Err(parameter("ODBC time requires a value within one day"));
-                        }
-                        let hour = (v / 3600.0).floor() as u32;
-                        let minute = ((v % 3600.0) / 60.0).floor() as u32;
-                        VarWCharBox::from_str_slice(&format!(
-                            "{hour:02}:{minute:02}:{:012.9}",
-                            v % 60.0
-                        ))
+            .map(|x| {
+                x.map(|x| {
+                    let x = x * scale;
+                    if !x.is_finite() || !(0.0..86400.0).contains(&x) {
+                        return Err(parameter("ODBC time must be within one day"));
                     }
-                };
-                Ok(boxed(WithDataType {
-                    value: text,
-                    data_type: DataType::Time { precision: 9 },
-                }))
+                    let seconds = x.floor() as u32;
+                    Ok(format!(
+                        "{:02}:{:02}:{:02}.{:07}",
+                        seconds / 3600,
+                        seconds / 60 % 60,
+                        seconds % 60,
+                        ((x.fract() * 1e7).floor()) as u32
+                    ))
+                })
+                .transpose()
             })
-            .collect();
-    }
-    if column.inherits("factor") {
-        let levels = column
-            .get_attrib("levels")
-            .and_then(|v| Strings::try_from(v).ok())
-            .ok_or_else(|| parameter("Invalid factor levels"))?;
-        let codes = column
-            .as_integer_slice()
-            .ok_or_else(|| parameter("Invalid factor storage"))?;
-        return codes
-            .iter()
-            .map(|&code| {
-                if code.is_na() {
-                    return Ok(boxed(VarWCharBox::null()));
-                }
-                if code <= 0 || code as usize > levels.len() {
-                    return Err(parameter("Invalid factor level index"));
-                }
-                let value = levels.elt(code as usize - 1);
-                Ok(boxed(if value.is_na() {
-                    VarWCharBox::null()
-                } else {
-                    VarWCharBox::from_str_slice(&value)
-                }))
-            })
-            .collect();
+            .collect::<Result<_>>()?;
+        return text(values, Some(DataType::Time { precision: 7 }));
     }
     match column.rtype() {
-        Rtype::Logicals => Ok(column
-            .as_logical_slice()
-            .unwrap()
-            .iter()
-            .map(|v| {
-                boxed(if v.is_na() {
-                    SqlNullable::<Bit>::null()
-                } else {
-                    SqlNullable::new(Bit(u8::from(v.is_true())))
+        Rtype::Logicals => Ok(fixed(
+            column
+                .as_logical_slice()
+                .unwrap()
+                .iter()
+                .map(|x| {
+                    if x.is_na() {
+                        None
+                    } else {
+                        Some(Bit::from_bool(x.is_true()))
+                    }
                 })
-            })
-            .collect()),
-        Rtype::Integers => Ok(column
-            .as_integer_slice()
-            .unwrap()
-            .iter()
-            .map(|&v| {
-                boxed(if v.is_na() {
-                    SqlNullable::<i32>::null()
-                } else {
-                    SqlNullable::new(v)
+                .collect(),
+            DataType::Bit,
+        )),
+        Rtype::Integers => Ok(fixed(
+            column
+                .as_integer_slice()
+                .unwrap()
+                .iter()
+                .map(|&x| if x.is_na() { None } else { Some(x) })
+                .collect(),
+            DataType::Integer,
+        )),
+        Rtype::Doubles => Ok(fixed(numbers(column)?, DataType::Double)),
+        // R may expose a null STRING_PTR for character(0). Avoid extendr's
+        // slice-backed iterator on that empty storage (Rust requires non-null
+        // slice pointers even at length zero).
+        Rtype::Strings if column.len() == 0 => text(vec![], None),
+        Rtype::Strings => text(
+            Strings::try_from(column)
+                .map_err(|_| parameter("Invalid character vector"))?
+                .iter()
+                .map(|x| if x.is_na() { None } else { Some(x.to_string()) })
+                .collect(),
+            None,
+        ),
+        Rtype::List => {
+            let values = column
+                .as_list()
+                .unwrap()
+                .values()
+                .map(|x| {
+                    if x.is_null() {
+                        Ok(None)
+                    } else {
+                        x.as_raw_slice()
+                            .map(|x| Some(x.to_vec()))
+                            .ok_or_else(|| parameter("Binary columns require raw vectors or NULL"))
+                    }
                 })
-            })
-            .collect()),
-        Rtype::Doubles => Ok(numeric_values(column)?
-            .into_iter()
-            .map(|v| boxed(v.map_or_else(SqlNullable::<f64>::null, SqlNullable::new)))
-            .collect()),
-        Rtype::Strings => Strings::try_from(column)
-            .map_err(|_| parameter("Invalid text vector"))?
-            .iter()
-            .map(|v| {
-                if v.is_na() {
-                    return Ok(boxed(VarWCharBox::null()));
+                .collect::<Result<Vec<_>>>()?;
+            let width = values
+                .iter()
+                .flatten()
+                .map(Vec::len)
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            let mut buffer = BinColumn::try_new(values.len(), width)
+                .map_err(|_| parameter("Parameter binary allocation is too large"))?;
+            for (i, value) in values.iter().enumerate() {
+                buffer.set_value(i, value.as_deref());
+            }
+            let data_type = if width <= 8000 {
+                DataType::Varbinary {
+                    length: NonZeroUsize::new(width),
                 }
-                if v.contains('\0') {
-                    return Err(parameter("Embedded NUL in text parameter"));
+            } else {
+                DataType::LongVarbinary {
+                    length: NonZeroUsize::new(width),
                 }
-                Ok(boxed(VarWCharBox::from_str_slice(v)))
-            })
-            .collect(),
-        Rtype::List => column
-            .as_list()
-            .unwrap()
-            .values()
-            .map(|v| {
-                if v.is_null() {
-                    return Ok(boxed(VarBinaryBox::null()));
-                }
-                let bytes = v
-                    .as_raw_slice()
-                    .ok_or_else(|| parameter("Binary columns must contain raw vectors or NULL"))?;
-                Ok(boxed(VarBinaryBox::from_vec(bytes.to_vec())))
-            })
-            .collect(),
+            };
+            Ok(Box::new(WithDataType {
+                value: buffer,
+                data_type,
+            }))
+        }
         _ => Err(parameter("Unsupported parameter column type")),
     }
+}
+
+fn parameter(message: impl Into<String>) -> DriverError {
+    DriverError::new("bind", "parameter", message)
 }

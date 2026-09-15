@@ -7,7 +7,7 @@ setMethod("dbFetch", "OdbcRsResult", function(res, n = -1, ...) {
   .dbi_no_dots(...)
   n <- .fetch_size(n)
   info <- .result_info(res)
-  if (!isTRUE(info$executed)) {
+  if (!isTRUE(info$bound)) {
     .dbi_argument_error("Result must be bound/executed before fetching")
   }
   if (identical(info$kind, "statement")) {

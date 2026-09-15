@@ -14,7 +14,9 @@ native_connect <- function(connection_string, config) .Call(wrap__native_connect
 
 native_prepare <- function(ptr, sql, statement, immediate) .Call(wrap__native_prepare, ptr, sql, statement, immediate)
 
-native_bind_scalar <- function(ptr, parameters) .Call(wrap__native_bind_scalar, ptr, parameters)
+native_bind <- function(ptr, parameters) .Call(wrap__native_bind, ptr, parameters)
+
+native_validate_parameters <- function(ptr, parameters) .Call(wrap__native_validate_parameters, ptr, parameters)
 
 native_fetch <- function(ptr, n) .Call(wrap__native_fetch, ptr, n)
 
@@ -35,5 +37,7 @@ native_result_status <- function(ptr) .Call(wrap__native_result_status, ptr)
 native_has_completed <- function(ptr) .Call(wrap__native_has_completed, ptr)
 
 native_column_info <- function(ptr) .Call(wrap__native_column_info, ptr)
+
+native_tables <- function(ptr, catalog, schema, table) .Call(wrap__native_tables, ptr, catalog, schema, table)
 
 # nolint end

@@ -1,17 +1,17 @@
-#' Execute SQL and bind scalar parameters
+#' Execute SQL and bind parameters
 #'
 #' Run SQL through the prepared or direct ODBC execution path. Both paths retain
 #' the same connection and use the shared result lifecycle and fetching code.
 #'
 #' @param conn An open OdbcRsConnection.
 #' @param statement A single SQL string, optionally wrapped in DBI::SQL().
-#' @param params A positional list of scalar parameter columns or a one-row data
+#' @param params A positional list of equally sized parameter columns or a data
 #'   frame. Names do not select placeholders. For send/convenience methods, NULL
 #'   means no supplied parameters. Binary values use a list-column of raw vectors
 #'   or NULL; use an R missing value for a scalar SQL NULL of other types.
 #' @param immediate TRUE uses direct execution, FALSE prepares the statement.
 #'   NULL selects the method's default: FALSE for send methods; TRUE without
-#'   params and FALSE with params for convenience methods. Supplied scalar
+#'   params and FALSE with params for convenience methods. Supplied
 #'   parameters are also bound on the direct path; they are not ignored.
 #' @param res An OdbcRsResult returned by a send method.
 #' @param n Rows requested by dbGetQuery(), with the same meaning as dbFetch().
@@ -32,10 +32,15 @@
 #' Native execution failure invalidates the result; clear it and create a new
 #' result. A failed query never causes an automatic retry or reconnection.
 #'
-#' This batch supports scalar binding only. Zero-row and multirow parameter
-#' batches, table-valued parameters, query cancellation, and R interruption of
-#' native execution are not implemented. Unsupported parameter batches fail
-#' before execution instead of silently running a subset of their rows.
+#' Multirow input uses one native parameter-array execution, not a loop over
+#' individual rows. Prepared zero-row batches perform no execution and produce
+#' typed empty query output or zero affected rows. Empty direct query batches
+#' require prepared mode to obtain metadata and are rejected before rebinding.
+#' Table-valued parameters, cancellation, and interruption are not implemented.
+#' Batch queries concatenate compatible driver result sets while retaining
+#' bounded fetching. Different result schemas produce an error. Batch failures
+#' expose available processed/successful parameter counts and uncertainty; no
+#' automatic retry or hidden transaction is introduced.
 #'
 #' Convenience methods compose the send/bind/fetch/count/clear lifecycle and
 #' always clear their result. On an execution, fetch, or R error, cleanup failures
@@ -46,7 +51,8 @@
 #' Whether an execution yields rows is determined by ODBC, not its first SQL
 #' keyword. Query-origin results expose fetched rows; statement-origin results
 #' expose affected counts. Use dbSendQuery()/dbGetQuery() for statements whose
-#' returned rows you want to fetch. Multiple-result-set traversal is not provided.
+#' returned rows you want to fetch. General multiple-result-set APIs are not
+#' provided; traversal is internal to native parameter batches.
 #' @seealso \code{\link{OdbcRs-result}}, \code{\link{OdbcRs-connection}}
 #' @rdname OdbcRs-execution
 #' @export
@@ -70,8 +76,8 @@ setMethod("dbSendStatement", c("OdbcRsConnection", "character"), function(
 #' @export
 setMethod("dbBind", "OdbcRsResult", function(res, params, ...) {
   .dbi_no_dots(...)
-  params <- .scalar_parameters(params)
-  .native_bind_scalar(res@ptr, params)
+  params <- .parameters(params)
+  .native_bind(res@ptr, params)
   invisible(res)
 })
 
@@ -97,7 +103,7 @@ setMethod("dbExecute", c("OdbcRsConnection", "character"), function(
   res <- dbSendStatement(conn, statement, params = params, immediate = immediate)
   .with_result_cleanup(res, {
     info <- .result_info(res)
-    if (!isTRUE(info$executed)) .dbi_argument_error("Statement requires parameters before it can execute")
+    if (!isTRUE(info$bound)) .dbi_argument_error("Statement requires parameters before it can execute")
     dbGetRowsAffected(res)
   })
 })
@@ -110,29 +116,27 @@ setMethod("dbExecute", c("OdbcRsConnection", "character"), function(
   immediate
 }
 
-.scalar_parameters <- function(params) {
-  if (!is.list(params)) .dbi_argument_error("params must be a list or a one-row data frame")
-  if (is.data.frame(params) && nrow(params) != 1L) {
-    .dbi_argument_error("Zero-row and multirow parameter batches are not implemented")
-  }
+.parameters <- function(params) {
+  if (!is.list(params)) .dbi_argument_error("params must be a list or data frame")
+  if (is.data.frame(params) && !ncol(params)) .dbi_argument_error("Parameter data frames require at least one column")
   if (any(vapply(params, is.data.frame, logical(1)))) {
     .dbi_argument_error("Table-valued parameters are not implemented")
   }
-  if (any(lengths(params) != 1L)) {
-    .dbi_argument_error("Scalar binding requires one value per parameter; batches are not implemented")
+  if (length(unique(lengths(params))) > 1L) {
+    .dbi_argument_error("Parameter columns must have equal lengths")
   }
   # Question-mark placeholders are positional, including data-frame columns.
   unname(as.list(params))
 }
 
 .send_result <- function(conn, statement, params, immediate, statement_result) {
-  if (!is.null(params)) params <- .scalar_parameters(params)
+  if (!is.null(params)) params <- .parameters(params)
   res <- .new_result(conn, statement, statement = statement_result, immediate = immediate)
   returned <- FALSE
   on.exit(if (!returned) .clear_result_after_error(res), add = TRUE)
   info <- .result_info(res)
   if (immediate || !is.null(params) || isTRUE(info$parameter_count == 0L)) {
-    .native_bind_scalar(res@ptr, if (is.null(params)) list() else params)
+    .native_bind(res@ptr, if (is.null(params)) list() else params)
   }
   returned <- TRUE
   res

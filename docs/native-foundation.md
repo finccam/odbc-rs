@@ -8,6 +8,9 @@ usable general DBI driver or a compatibility claim.
 [Batch A](batch-a-sql.md) adds SQL Server quoting and type declarations in R;
 the native resource layer is shared by prepared and direct execution.
 
+[Batch C](batch-c-tables.md) adds native parameter arrays and SQL Server table
+operations, with explicit partial-effect reporting and no hidden transactions.
+
 ## Ownership and lifecycle
 
 `OdbcRsConnection@ptr` and `OdbcRsResult@ptr` are private extendr external pointers.

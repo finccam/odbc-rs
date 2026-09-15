@@ -2,7 +2,7 @@
 //! only after Rust has released operation borrows and temporary resources.
 use crate::{
     error::{DriverError, Result as NativeResult},
-    parameters::ParameterBatch,
+    parameters::Parameters,
     state::{ConnectionState, ConnectionStatus, ResultKind, ResultState},
     types::{BigInt, Column, Kind, Options, Values},
 };
@@ -45,7 +45,11 @@ fn boundary(f: impl FnOnce() -> NativeResult<Robj>) -> List {
                 kind = error.kind,
                 sqlstate = error.sqlstate,
                 native_code = error.native_code,
-                uncertain = error.uncertain
+                uncertain = error.uncertain,
+                batch_size = error.batch_size.map(|x| x as f64),
+                batch_processed = error.batch_processed.map(|x| x as f64),
+                batch_succeeded = error.batch_succeeded.map(|x| x as f64),
+                batch_outcome_uncertain = error.batch_outcome_uncertain
             )
         ),
     }
@@ -175,7 +179,7 @@ fn native_prepare(ptr: Robj, sql: String, statement: bool, immediate: bool) -> L
 }
 
 #[extendr]
-fn native_bind_scalar(ptr: Robj, parameters: Robj) -> List {
+fn native_bind(ptr: Robj, parameters: Robj) -> List {
     boundary(|| {
         let result = result(ptr)?;
         let (conn, count) = {
@@ -185,14 +189,22 @@ fn native_bind_scalar(ptr: Robj, parameters: Robj) -> List {
         };
         let _guard = PoisonOnUnwind(conn.clone());
         conn.check("bind")?;
-        let mut batch = ParameterBatch::from_r(&parameters, count, &conn.options)?;
-        if batch.rows.len() != 1 {
-            return Err(DriverError::new("bind", "parameter", "This private scalar primitive requires exactly one parameter row; batch execution is a separate operation"));
-        }
+        let parameters = Parameters::from_r(&parameters, count, &conn.options)?;
         result
             .try_borrow_mut()
             .map_err(|_| busy())?
-            .execute(batch.rows.pop().unwrap())?;
+            .execute(parameters)?;
+        Ok(().into())
+    })
+}
+
+#[extendr]
+fn native_validate_parameters(ptr: Robj, parameters: Robj) -> List {
+    boundary(|| {
+        let conn = connection(ptr)?;
+        conn.check("validate_parameters")?;
+        let _guard = PoisonOnUnwind(conn.clone());
+        let _parameters = Parameters::from_r(&parameters, None, &conn.options)?;
         Ok(().into())
     })
 }
@@ -323,6 +335,27 @@ fn native_connection_info(ptr: Robj) -> List {
 }
 
 #[extendr]
+fn native_tables(ptr: Robj, catalog: String, schema: String, table: String) -> List {
+    boundary(|| {
+        let conn = connection(ptr)?;
+        let _guard = PoisonOnUnwind(conn.clone());
+        let rows = conn.tables(&catalog, &schema, &table).map_err(|e| {
+            conn.observe_error(&e);
+            e
+        })?;
+        Ok(List::from_values(rows.into_iter().map(|r| {
+            list!(
+                catalog = r.catalog,
+                schema = r.schema,
+                name = r.name,
+                table_type = r.table_type
+            )
+        }))
+        .into())
+    })
+}
+
+#[extendr]
 fn native_result_status(ptr: Robj) -> List {
     boundary(|| {
         let result = result(ptr)?;
@@ -375,7 +408,8 @@ fn native_result_info(ptr: Robj) -> List {
                 list!(
                     id = e.id.to_string(),
                     outcome = e.outcome,
-                    duration_seconds = e.duration_seconds
+                    duration_seconds = e.duration_seconds,
+                    batch_size = e.batch_size as f64
                 )
                 .into()
             })
@@ -395,6 +429,8 @@ fn native_result_info(ptr: Robj) -> List {
                 "statement"
             },
             executed = state.native_attempt.is_some(),
+            bound = state.bound,
+            batch_size = state.batch_size as f64,
             parameter_count = state.parameter_count.map(|n| n as i32),
             immediate = state.immediate,
             statement = state.sql.clone(),
@@ -514,7 +550,8 @@ extendr_module! {
     mod bridge;
     fn native_connect;
     fn native_prepare;
-    fn native_bind_scalar;
+    fn native_bind;
+    fn native_validate_parameters;
     fn native_fetch;
     fn native_clear;
     fn native_disconnect;
@@ -525,4 +562,5 @@ extendr_module! {
     fn native_result_status;
     fn native_has_completed;
     fn native_column_info;
+    fn native_tables;
 }
