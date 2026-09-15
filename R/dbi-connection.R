@@ -33,7 +33,7 @@ setMethod("dbConnect", "OdbcRsDriver", function(
   ptr <- .native_connect(text, config)
   installed <- FALSE
   on.exit(if (!installed) try(.native_disconnect(ptr), silent = TRUE), add = TRUE)
-  conn <- new("OdbcRsConnection", ptr = ptr)
+  conn <- new("OdbcRsConnection", ptr = ptr, timezone = config$timezone)
   # This callback captures no connection or pointer. It reports abandonment but
   # leaves the lifetime of a session retained by live results to native ownership.
   reg.finalizer(ptr, .finalize_connection, onexit = TRUE)

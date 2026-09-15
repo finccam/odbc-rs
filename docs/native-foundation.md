@@ -5,6 +5,9 @@ This document records the private Rust resource and conversion foundation.
 these primitives; public execution remains the next batch. This is not yet a
 usable general DBI driver or a compatibility claim.
 
+[Batch A](batch-a-sql.md) adds SQL Server quoting and type declarations in R;
+public execution remains the next dependency layer.
+
 ## Ownership and lifecycle
 
 `OdbcRsConnection@ptr` and `OdbcRsResult@ptr` are private extendr external pointers.

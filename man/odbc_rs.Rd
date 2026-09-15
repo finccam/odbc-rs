@@ -4,5 +4,5 @@
 \usage{odbc_rs()}
 \value{An \code{OdbcRsDriver} object.}
 \description{Constructs a DBI driver object without opening a connection.
-Connection lifecycle and result access methods are available. Public execution,
-table, quoting, and transaction methods remain scaffolded.}
+Connection lifecycle, result access, SQL Server quoting, and type declaration
+methods are available. Public execution, table, and transaction methods remain scaffolded.}
