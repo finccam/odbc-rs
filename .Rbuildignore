@@ -1,4 +1,5 @@
 ^rpx\.lock$
+^compose\.yaml$
 ^.*\.Rproj$
 ^\.Rproj\.user$
 ^README\.Rmd$

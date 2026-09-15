@@ -9,4 +9,31 @@ NULL
 #' @export
 hello_world <- function() .Call(wrap__hello_world)
 
+#' Private connection primitive; does not construct a public DBI object.
+native_connect <- function(connection_string, config) .Call(wrap__native_connect, connection_string, config)
+
+native_prepare <- function(ptr, sql, statement) .Call(wrap__native_prepare, ptr, sql, statement)
+
+native_bind_scalar <- function(ptr, parameters) .Call(wrap__native_bind_scalar, ptr, parameters)
+
+native_fetch <- function(ptr, n) .Call(wrap__native_fetch, ptr, n)
+
+native_clear <- function(ptr) .Call(wrap__native_clear, ptr)
+
+native_disconnect <- function(ptr) .Call(wrap__native_disconnect, ptr)
+
+native_connection_info <- function(ptr) .Call(wrap__native_connection_info, ptr)
+
+native_connection_status <- function(ptr) .Call(wrap__native_connection_status, ptr)
+
+native_connection_valid <- function(ptr) .Call(wrap__native_connection_valid, ptr)
+
+native_result_info <- function(ptr) .Call(wrap__native_result_info, ptr)
+
+native_result_status <- function(ptr) .Call(wrap__native_result_status, ptr)
+
+native_has_completed <- function(ptr) .Call(wrap__native_has_completed, ptr)
+
+native_column_info <- function(ptr) .Call(wrap__native_column_info, ptr)
+
 # nolint end

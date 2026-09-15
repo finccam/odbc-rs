@@ -15,6 +15,8 @@
     "blob (>= 1.3.0)",
     "DBI (< 2.0.0)",
     "DBI (>= 1.3.0)",
+    "DBItest (< 2.0.0)",
+    "DBItest (>= 1.8.3)",
     "devtools (< 3.0.0)",
     "devtools (>= 2.5.2)",
     "hms (< 2.0.0)",
@@ -22,6 +24,8 @@
     "methods",
     "rextendr (< 1.0.0)",
     "rextendr (>= 0.5.0)",
+    "testthat (< 4.0.0)",
+    "testthat (>= 3.3.2)",
     "usethis (< 4.0.0)",
     "usethis (>= 3.2.2)",
     "utils"
@@ -33,6 +37,27 @@
       "dependencies": [
         "methods",
         "R (>= 3.0.0)"
+      ]
+    },
+    "DBItest": {
+      "version": "1.8.3",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "blob (>= 1.2.0)",
+        "callr",
+        "DBI (>= 1.2.3)",
+        "desc",
+        "hms (>= 0.5.0)",
+        "lubridate",
+        "magrittr",
+        "methods",
+        "nanoarrow",
+        "palmerpenguins",
+        "R (>= 3.2.0)",
+        "rlang (>= 0.2.0)",
+        "testthat (>= 2.0.0)",
+        "utils",
+        "withr"
       ]
     },
     "R6": {
@@ -515,6 +540,16 @@
         "rlang (>= 1.1.0)"
       ]
     },
+    "lubridate": {
+      "version": "1.9.5",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "generics",
+        "methods",
+        "R (>= 3.2)",
+        "timechange (>= 0.4.0)"
+      ]
+    },
     "magrittr": {
       "version": "2.0.5",
       "repository": "https://rrepo.dev/upstream/cran",
@@ -546,6 +581,11 @@
         "utils"
       ]
     },
+    "nanoarrow": {
+      "version": "0.9.0",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": []
+    },
     "openssl": {
       "version": "2.4.2",
       "repository": "https://rrepo.dev/upstream/cran",
@@ -567,6 +607,13 @@
         "R (>= 3.5)",
         "tools",
         "utils"
+      ]
+    },
+    "palmerpenguins": {
+      "version": "0.1.1",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "R (>= 2.10)"
       ]
     },
     "pillar": {
@@ -1002,6 +1049,14 @@
         "rlang (>= 1.0.4)",
         "vctrs (>= 0.5.2)",
         "withr"
+      ]
+    },
+    "timechange": {
+      "version": "0.4.0",
+      "repository": "https://rrepo.dev/upstream/cran",
+      "dependencies": [
+        "cpp11 (>= 0.2.7)",
+        "R (>= 3.3)"
       ]
     },
     "tinytex": {
