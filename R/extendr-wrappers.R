@@ -24,6 +24,8 @@ native_clear <- function(ptr) .Call(wrap__native_clear, ptr)
 
 native_disconnect <- function(ptr) .Call(wrap__native_disconnect, ptr)
 
+native_transaction <- function(ptr, operation) .Call(wrap__native_transaction, ptr, operation)
+
 native_connection_info <- function(ptr) .Call(wrap__native_connection_info, ptr)
 
 native_connection_status <- function(ptr) .Call(wrap__native_connection_status, ptr)

@@ -2,7 +2,7 @@
 #'
 #' Connection lifecycle and result access methods use the native resource layer.
 #' SQL Server quoting, type declarations, execution, binding, and table methods
-#' are supported. Transaction methods remain scaffolded.
+#' and DBI-managed transactions are supported.
 #' Connections and results have private external-pointer slots.
 #' @import methods
 #' @import DBI
@@ -31,7 +31,7 @@ setClass(
 #'
 #' Constructs the driver object without opening a database connection.
 #' Use DBI::dbConnect() to open a connection. Query execution, parameter batches,
-#' and table methods are supported. Transaction methods are not yet implemented.
+#' table methods, and DBI-managed transactions are supported.
 #' @return An OdbcRsDriver object.
 #' @export
 odbc_rs <- function() {

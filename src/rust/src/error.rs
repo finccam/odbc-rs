@@ -15,6 +15,7 @@ pub struct DriverError {
     pub batch_processed: Option<usize>,
     pub batch_succeeded: Option<usize>,
     pub batch_outcome_uncertain: bool,
+    pub transaction_outcome: Option<&'static str>,
 }
 
 impl DriverError {
@@ -30,6 +31,7 @@ impl DriverError {
             batch_processed: None,
             batch_succeeded: None,
             batch_outcome_uncertain: false,
+            transaction_outcome: None,
         }
     }
 
@@ -61,6 +63,7 @@ impl DriverError {
             batch_processed: None,
             batch_succeeded: None,
             batch_outcome_uncertain: false,
+            transaction_outcome: None,
         }
     }
 }

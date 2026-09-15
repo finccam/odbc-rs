@@ -3,7 +3,7 @@
 use crate::{
     error::{DriverError, Result as NativeResult},
     parameters::Parameters,
-    state::{ConnectionState, ConnectionStatus, ResultKind, ResultState},
+    state::{ConnectionState, ConnectionStatus, ResultKind, ResultState, TransactionState},
     types::{BigInt, Column, Kind, Options, Values},
 };
 use extendr_api::prelude::*;
@@ -21,6 +21,9 @@ impl Drop for PoisonOnUnwind {
     fn drop(&mut self) {
         if std::thread::panicking() {
             self.0.status.set(ConnectionStatus::Uncertain);
+            if self.0.transaction.get() != TransactionState::Autocommit {
+                self.0.transaction.set(TransactionState::Failed);
+            }
         }
     }
 }
@@ -49,7 +52,8 @@ fn boundary(f: impl FnOnce() -> NativeResult<Robj>) -> List {
                 batch_size = error.batch_size.map(|x| x as f64),
                 batch_processed = error.batch_processed.map(|x| x as f64),
                 batch_succeeded = error.batch_succeeded.map(|x| x as f64),
-                batch_outcome_uncertain = error.batch_outcome_uncertain
+                batch_outcome_uncertain = error.batch_outcome_uncertain,
+                transaction_outcome = error.transaction_outcome
             )
         ),
     }
@@ -280,6 +284,27 @@ fn native_disconnect(ptr: Robj) -> List {
 }
 
 #[extendr]
+fn native_transaction(ptr: Robj, operation: String) -> List {
+    boundary(|| {
+        let conn = connection(ptr)?;
+        let _guard = PoisonOnUnwind(conn.clone());
+        match operation.as_str() {
+            "begin" => conn.begin()?,
+            "commit" => conn.finish_transaction(true)?,
+            "rollback" => conn.finish_transaction(false)?,
+            _ => {
+                return Err(DriverError::new(
+                    "transaction",
+                    "parameter",
+                    "Unknown transaction operation",
+                ))
+            }
+        }
+        Ok(().into())
+    })
+}
+
+#[extendr]
 fn native_connection_status(ptr: Robj) -> List {
     boundary(|| {
         let conn = connection(ptr)?;
@@ -287,6 +312,7 @@ fn native_connection_status(ptr: Robj) -> List {
             id = conn.id.to_string(),
             valid = conn.check("validity").is_ok(),
             status = format!("{:?}", conn.status.get()),
+            transaction = format!("{:?}", conn.transaction.get()),
             local = conn.local(),
             has_native = conn.has_native(),
             active_results = conn.active_results() as f64
@@ -324,6 +350,7 @@ fn native_connection_info(ptr: Robj) -> List {
             id = conn.id.to_string(),
             dbms_name = info.dbms_name,
             database = info.database,
+            transaction = format!("{:?}", conn.transaction.get()),
             dbms_version = Rstr::na(),
             driver_name = Rstr::na(),
             driver_version = Rstr::na(),
@@ -555,6 +582,7 @@ extendr_module! {
     fn native_fetch;
     fn native_clear;
     fn native_disconnect;
+    fn native_transaction;
     fn native_connection_info;
     fn native_connection_status;
     fn native_connection_valid;

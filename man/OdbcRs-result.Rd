@@ -61,5 +61,8 @@ Clearing promptly releases the cursor, statement, buffers, and connection lease.
 Repeated clearing warns. Failed or uncertain results can still be cleared.
 Metadata/count methods and fetching raise an error after clear or disconnect.
 Results and their pointers cannot be transferred between processes.
+Partially consumed queries are invalidated at transaction completion. Exhausted
+queries and unexecuted preparations retain their handles for reuse; see
+\code{\link{OdbcRs-transactions}}.
 }
 \seealso{\code{\link{OdbcRs-connection}}}

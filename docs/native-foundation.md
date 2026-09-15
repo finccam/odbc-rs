@@ -11,6 +11,9 @@ the native resource layer is shared by prepared and direct execution.
 [Batch C](batch-c-tables.md) adds native parameter arrays and SQL Server table
 operations, with explicit partial-effect reporting and no hidden transactions.
 
+[Batch D](batch-d-transactions.md) adds explicit DBI transaction control and
+rollback-safe resource handling on that same connection.
+
 ## Ownership and lifecycle
 
 `OdbcRsConnection@ptr` and `OdbcRsResult@ptr` are private extendr external pointers.

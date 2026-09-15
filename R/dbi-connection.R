@@ -1,7 +1,8 @@
 #' Connect and inspect Rust-backed ODBC objects
 #'
 #' Connections use the same named ODBC attribute conventions as odbc and support
-#' query and statement execution, parameter batches, and table operations.
+#' query and statement execution, parameter batches, table operations, and
+#' DBI-managed transactions.
 #' @rdname OdbcRs-connection
 #' @export
 setMethod("dbConnect", "OdbcRsDriver", function(
@@ -109,7 +110,8 @@ setMethod("dbGetInfo", "OdbcRsConnection", function(dbObj, ...) {
     dbms.name = .metadata_string(info$dbms_name),
     driver.name = .metadata_string(info$driver_name),
     driver.version = .metadata_string(info$driver_version),
-    connection.id = info$id
+    connection.id = info$id,
+    transaction.state = info$transaction
   )
 })
 

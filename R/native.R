@@ -55,6 +55,10 @@
   .native_value(.Call(wrap__native_disconnect, ptr))
 }
 
+.native_transaction <- function(ptr, operation) {
+  .native_value(.Call(wrap__native_transaction, ptr, operation))
+}
+
 .native_connection_info <- function(ptr) {
   .native_value(.Call(wrap__native_connection_info, ptr))
 }

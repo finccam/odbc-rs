@@ -88,6 +88,9 @@ is connection-specific. No credential or connection-string fields are returned.
 Results report statement, row.count, rows.affected, and has.completed. Information
 on cleared results or invalid connections raises an error.
 
+Connection information also includes transaction.state for the DBI-managed
+transaction lifecycle. Raw SQL transaction control is not tracked by that field.
+
 Display uses local state only and never prints unrestricted SQL, credentials,
 connection strings, native pointers, or server-provided text.
 }

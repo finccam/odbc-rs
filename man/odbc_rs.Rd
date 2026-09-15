@@ -5,5 +5,5 @@
 \value{An \code{OdbcRsDriver} object.}
 \description{Constructs a DBI driver object without opening a connection.
 Connection lifecycle, result access, SQL Server quoting, and type declaration
-methods, parameter batches, and table operations are available.
-Transaction methods are not yet implemented.}
+methods, parameter batches, table operations, and DBI-managed transactions are
+available. Cancellation and external instrumentation are not yet implemented.}

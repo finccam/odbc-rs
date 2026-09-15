@@ -38,6 +38,7 @@ enum Resource {
     Ready(StatementOwner),
     Active(ActiveResult),
     Failed,
+    Invalidated,
     Cleared,
 }
 
@@ -47,6 +48,14 @@ pub enum ConnectionStatus {
     Closing,
     Closed,
     Uncertain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TransactionState {
+    Autocommit,
+    Active,
+    Finishing,
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -71,6 +80,7 @@ pub struct ConnectionState {
     pub id: u64,
     pub pid: u32,
     pub status: Cell<ConnectionStatus>,
+    pub transaction: Cell<TransactionState>,
     native: RefCell<Option<Arc<Connection<'static>>>>,
     results: RefCell<Vec<Weak<RefCell<ResultState>>>>,
     pub options: Options,
@@ -129,6 +139,7 @@ impl ConnectionState {
             id: identity(),
             pid: std::process::id(),
             status: Cell::new(ConnectionStatus::Open),
+            transaction: Cell::new(TransactionState::Autocommit),
             native: RefCell::new(Some(Arc::new(connection))),
             results: RefCell::new(vec![]),
             options,
@@ -211,9 +222,127 @@ impl ConnectionState {
     }
 
     pub fn observe_error(&self, error: &DriverError) {
-        if error.uncertain {
+        // A deadlock/serialization failure can end the server transaction. Do
+        // not silently start fresh work under the old DBI transaction state.
+        let transaction_ended = self.transaction.get() == TransactionState::Active
+            && error.sqlstate.as_deref() == Some("40001");
+        if error.uncertain || transaction_ended {
             self.status.set(ConnectionStatus::Uncertain);
+            if self.transaction.get() != TransactionState::Autocommit {
+                self.transaction.set(TransactionState::Failed);
+            }
         }
+    }
+
+    fn transaction_error(
+        &self,
+        operation: &'static str,
+        error: odbc_api::Error,
+        outcome: &'static str,
+    ) -> DriverError {
+        self.transaction.set(TransactionState::Failed);
+        self.status.set(ConnectionStatus::Uncertain);
+        let mut error = DriverError::odbc(operation, error);
+        error.uncertain = true;
+        error.transaction_outcome = Some(outcome);
+        error
+    }
+
+    pub fn begin(&self) -> Result<()> {
+        self.check("begin")?;
+        if self.transaction.get() != TransactionState::Autocommit {
+            return Err(invalid(
+                "begin",
+                "A transaction is already active; nested transactions are not supported",
+            ));
+        }
+        let native = self.native.borrow();
+        let native = native
+            .as_ref()
+            .ok_or_else(|| invalid("begin", "Connection is closed"))?;
+        // Pessimistic state survives a Rust panic during the mode transition.
+        self.transaction.set(TransactionState::Failed);
+        native
+            .set_autocommit(false)
+            .map_err(|e| self.transaction_error("begin", e, "unknown"))?;
+        self.transaction.set(TransactionState::Active);
+        Ok(())
+    }
+
+    pub fn finish_transaction(&self, commit: bool) -> Result<()> {
+        let operation = if commit { "commit" } else { "rollback" };
+        if !self.local() || !self.has_native() || self.status.get() == ConnectionStatus::Closed {
+            return Err(invalid(
+                operation,
+                "Connection is closed or belongs to another process",
+            ));
+        }
+        if commit {
+            self.check(operation)?;
+            if self.transaction.get() != TransactionState::Active {
+                return Err(invalid(
+                    operation,
+                    "No committable DBI transaction is active",
+                ));
+            }
+        } else if !matches!(
+            self.transaction.get(),
+            TransactionState::Active | TransactionState::Failed
+        ) {
+            return Err(invalid(operation, "No DBI transaction is active"));
+        }
+
+        // Acquire all borrows before any cursor or transaction state changes.
+        // Transaction completion closes cursor streams explicitly, so buffered
+        // rows cannot survive a rollback. Unexecuted preparations are retained.
+        let results: Vec<_> = self
+            .results
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        let mut guards = results
+            .iter()
+            .map(|r| {
+                r.try_borrow_mut()
+                    .map_err(|_| invalid(operation, "A result is currently in use"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for result in &mut guards {
+            if let Err(mut error) = result.close_transaction_cursor() {
+                self.status.set(ConnectionStatus::Uncertain);
+                self.transaction.set(TransactionState::Failed);
+                error.uncertain = true;
+                return Err(error);
+            }
+        }
+        let native = self.native.borrow();
+        let native = native
+            .as_ref()
+            .ok_or_else(|| invalid(operation, "Connection is closed"))?;
+        self.transaction.set(TransactionState::Finishing);
+        let result = if commit {
+            native.commit()
+        } else {
+            native.rollback()
+        };
+        result.map_err(|e| self.transaction_error(operation, e, "unknown"))?;
+
+        // Only restore autocommit after the server acknowledged completion.
+        // SQLSetConnectAttr(AUTOCOMMIT=ON) itself commits pending work otherwise.
+        let outcome = if commit { "committed" } else { "rolled_back" };
+        native.set_autocommit(true).map_err(|e| {
+            let mut error = self.transaction_error("restore_autocommit", e, outcome);
+            error.message = format!(
+                "Transaction {outcome}, but restoring autocommit failed: {}",
+                error.message
+            );
+            error
+        })?;
+        self.transaction.set(TransactionState::Autocommit);
+        // A successful cleanup rollback does not automatically rehabilitate a
+        // connection previously marked uncertain by a transport/commit failure.
+        Ok(())
     }
 
     pub fn local(&self) -> bool {
@@ -354,6 +483,17 @@ impl ConnectionState {
             }
         }
         let native = self.native.borrow_mut().take();
+        if self.transaction.get() != TransactionState::Autocommit {
+            if let Some(native) = native.as_ref() {
+                match native.rollback() {
+                    Ok(()) => self.transaction.set(TransactionState::Autocommit),
+                    Err(error) => {
+                        let error = self.transaction_error("disconnect_rollback", error, "unknown");
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+        }
         if let Err(error) = release(native, "disconnect") {
             first_error.get_or_insert(error);
         }
@@ -375,7 +515,10 @@ impl ResultState {
 
     pub fn valid(&self) -> bool {
         self.connection().is_ok_and(|c| c.check("validity").is_ok())
-            && !matches!(self.resource, Resource::Cleared | Resource::Failed)
+            && !matches!(
+                self.resource,
+                Resource::Cleared | Resource::Failed | Resource::Invalidated
+            )
     }
 
     pub fn local(&self) -> bool {
@@ -391,7 +534,10 @@ impl ResultState {
             return Err(invalid(operation, "Result belongs to another process"));
         }
         if !self.has_resource() {
-            return Err(invalid(operation, "Result has been cleared or has failed"));
+            return Err(invalid(
+                operation,
+                "Result has been cleared, failed, or invalidated by transaction completion",
+            ));
         }
         self.connection()?.check(operation)
     }
@@ -403,6 +549,7 @@ impl ResultState {
         match &self.resource {
             Resource::Cleared => "cleared",
             Resource::Failed => "failed",
+            Resource::Invalidated => "invalidated",
             _ if !self.valid() => "invalid",
             _ if self.kind == ResultKind::Statement && self.bound => "completed",
             Resource::Ready(_) if !self.bound => {
@@ -469,7 +616,31 @@ impl ResultState {
                 "bind",
                 "Result has failed; clear it and prepare a new result",
             )),
+            Resource::Invalidated => {
+                self.resource = Resource::Invalidated;
+                Err(invalid(
+                    "bind",
+                    "Result was invalidated by transaction completion",
+                ))
+            }
         }
+    }
+
+    fn close_transaction_cursor(&mut self) -> Result<()> {
+        if !matches!(self.resource, Resource::Active(_)) {
+            return Ok(());
+        }
+        let completed = self.complete();
+        let owner = self.recover_statement()?;
+        if completed {
+            // Exhausted queries and statement results retain their prepared
+            // handles, metadata, and counts for subsequent inspection/rebinding.
+            self.resource = Resource::Ready(owner);
+        } else {
+            self.resource = Resource::Invalidated;
+            release(owner, "transaction_cursor_cleanup")?;
+        }
+        Ok(())
     }
 
     /// One native parameter-array execution, never a scalar fallback loop.
@@ -815,6 +986,12 @@ impl Drop for ConnectionState {
         if self.pid != std::process::id() {
             std::mem::forget(native);
         } else {
+            if self.transaction.get() != TransactionState::Autocommit {
+                if let Some(native) = native.as_ref() {
+                    // Finalizers never raise R conditions or run observer callbacks.
+                    let _ = catch_unwind(AssertUnwindSafe(|| native.rollback()));
+                }
+            }
             let _ = release(native, "finalize_connection");
         }
     }
